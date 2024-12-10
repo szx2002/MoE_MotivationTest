@@ -22,7 +22,7 @@ def main():
         
         # 加载分词器
         tokenizer = AutoTokenizer.from_pretrained(
-            "C:\\Uconn\\MoETest\\huggingfaceM87Bv01",
+            "/vllm-workspace/MoE_MotivationTest/huggingfaceM87Bv01",
             token=token
         )
         
