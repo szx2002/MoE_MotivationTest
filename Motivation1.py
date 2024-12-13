@@ -38,7 +38,6 @@ def main():
             "lm_head": 0
         }
         
-        # 加载模型
         model = AutoModelForCausalLM.from_pretrained(
             "mistralai/Mixtral-8x7B-v0.1",
             quantization_config=quantization_config,
@@ -53,21 +52,21 @@ def main():
         # 根据实际情况修改判断是否为MoE层的逻辑
         def is_moe_layer(layer_module):
             class_name_lower = layer_module.__class__.__name__.lower()
-            # 如果是MoE层的Block名字中有 "moe"
-            # 请根据实际模型结构修改此判断条件
+            # 根据实际模型中MoE层的类名或特征调整此逻辑
             return "moe" in class_name_lower
         
+        # 准备计时用的变量
         moe_layer_time = 0.0
         normal_layer_time = 0.0
         layer_start_times = {}
-        
-        def make_pre_hook(idx, module_is_moe):
+
+        def make_pre_hook(module_is_moe):
             def forward_pre_hook(module, inp):
                 torch.cuda.synchronize()
                 layer_start_times[id(module)] = time.time()
             return forward_pre_hook
 
-        def make_post_hook(idx, module_is_moe):
+        def make_post_hook(module_is_moe):
             def forward_hook(module, inp, out):
                 torch.cuda.synchronize()
                 elapsed = time.time() - layer_start_times[id(module)]
@@ -81,14 +80,15 @@ def main():
         # 对model.model.layers中的每个transformer层注册hook
         for i, layer_module in enumerate(model.model.layers):
             module_is_moe = is_moe_layer(layer_module)
-            layer_module.register_forward_pre_hook(make_pre_hook(i, module_is_moe))
-            layer_module.register_forward_hook(make_post_hook(i, module_is_moe))
+            layer_module.register_forward_pre_hook(make_pre_hook(module_is_moe))
+            layer_module.register_forward_hook(make_post_hook(module_is_moe))
         
         # 准备不同长度的请求输入
         prompt_lengths = [8, 16, 32, 64, 128, 256, 512]
         
         moe_times = []
         normal_times = []
+        total_times = []
 
         base_prompt = "What is artificial intelligence? "
         
@@ -100,9 +100,13 @@ def main():
             normal_layer_time = 0.0
             layer_start_times.clear()
             
+            # 准备输入
             inputs = tokenizer(prompt, return_tensors="pt").to("cuda")
+
+            # 计时整个预测过程（从调用generate到返回之间）
+            torch.cuda.synchronize()
+            start_total = time.time()
             with torch.inference_mode():
-                # 禁用cache以确保每次完整计算
                 outputs = model.generate(
                     **inputs,
                     max_new_tokens=1,
@@ -111,23 +115,51 @@ def main():
                     temperature=0.7,
                     top_p=0.95,
                     repetition_penalty=1.1,
-                    use_cache=False
+                    use_cache=False  # 确保每次计算完整forward
                 )
+            torch.cuda.synchronize()
+            end_total = time.time()
             
+            total_latency = end_total - start_total
+            
+            # 计算MoE层latency
+            # 已有moe_layer_time与normal_layer_time
+            # MoE层latency = moe_layer_time
+            # 普通Transformer层latency = normal_layer_time
+            # 总latency = total_latency
+
             moe_times.append(moe_layer_time)
             normal_times.append(normal_layer_time)
-            print(f"请求长度 {pl} 完成：MoE总延迟 {moe_layer_time:.4f}s, 普通层总延迟 {normal_layer_time:.4f}s")
+            total_times.append(total_latency)
 
-        # 绘图
+            print(f"请求长度 {pl} 完成：")
+            print(f"  MoE总延迟   {moe_layer_time:.4f}s")
+            print(f"  普通层总延迟 {normal_layer_time:.4f}s")
+            print(f"  整个预测过程延迟 {total_latency:.4f}s")
+
+        # 绘制第一张图：MoE层latency，普通层latency和总latency随请求长度变化
         plt.figure(figsize=(10, 6))
         plt.plot(prompt_lengths, moe_times, label='MoE Layers Latency', marker='o')
-        plt.plot(prompt_lengths, normal_times, label='Transformer Layers Latency', marker='s')
+        plt.plot(prompt_lengths, normal_times, label='Normal Transformer Layers Latency', marker='s')
+        plt.plot(prompt_lengths, total_times, label='Total Inference Latency', marker='^')
         plt.xlabel("Request Length")
         plt.ylabel("Latency (seconds)")
-        plt.title("MoE layer vs Transformer layer latency as request length increases")
+        plt.title("MoE vs Normal Transformer Layers vs Total Latency")
         plt.legend()
         plt.grid(True)
-        plt.savefig("moe_vs_transformer_latency.png")
+        plt.savefig("moe_normal_total_latency.png")
+        plt.show()
+
+        # 绘制第二张图：MoE层latency在整个预测延迟中的占比
+        ratio = [ (m / t) * 100.0 if t > 0 else 0.0 for m, t in zip(moe_times, total_times) ]
+        
+        plt.figure(figsize=(10, 6))
+        plt.plot(prompt_lengths, ratio, label='MoE Latency Percentage', marker='o')
+        plt.xlabel("Request Length")
+        plt.ylabel("MoE Latency Percentage (%)")
+        plt.title("MoE Latency Share in Total Inference Latency")
+        plt.grid(True)
+        plt.savefig("moe_latency_percentage.png")
         plt.show()
 
     except Exception as e:
