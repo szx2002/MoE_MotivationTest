@@ -52,10 +52,8 @@ def main():
         # 根据实际情况修改判断是否为MoE层的逻辑
         def is_moe_layer(layer_module):
             class_name_lower = layer_module.__class__.__name__.lower()
-            # 根据实际模型中MoE层的类名或特征调整此逻辑
             return "moe" in class_name_lower
         
-        # 准备计时用的变量
         moe_layer_time = 0.0
         normal_layer_time = 0.0
         layer_start_times = {}
@@ -83,27 +81,35 @@ def main():
             layer_module.register_forward_pre_hook(make_pre_hook(module_is_moe))
             layer_module.register_forward_hook(make_post_hook(module_is_moe))
         
-        # 准备不同长度的请求输入
-        prompt_lengths = [8, 16, 32, 64, 128, 256, 512]
+        # 从文件中读取请求
+        input_file = "requests.txt"
+        requests = []
+        with open(input_file, 'r', encoding='utf-8') as f:
+            for line in f:
+                req = line.strip()
+                if req:
+                    requests.append(req)
         
+        # 分别对每个请求进行推理并计时
+        request_lengths = []
         moe_times = []
         normal_times = []
         total_times = []
 
-        base_prompt = "What is artificial intelligence? "
-        
-        for pl in prompt_lengths:
-            prompt = base_prompt + ("A" * pl)
-            
+        for req in requests:
+            # 对请求分词后获取长度
+            input_ids = tokenizer(req, return_tensors="pt").input_ids
+            req_length = input_ids.shape[1]  # token数
+            request_lengths.append(req_length)
+
             # 重置计时统计
             moe_layer_time = 0.0
             normal_layer_time = 0.0
             layer_start_times.clear()
             
-            # 准备输入
-            inputs = tokenizer(prompt, return_tensors="pt").to("cuda")
+            inputs = tokenizer(req, return_tensors="pt").to("cuda")
 
-            # 计时整个预测过程（从调用generate到返回之间）
+            # 计时整个预测过程
             torch.cuda.synchronize()
             start_total = time.time()
             with torch.inference_mode():
@@ -115,34 +121,29 @@ def main():
                     temperature=0.7,
                     top_p=0.95,
                     repetition_penalty=1.1,
-                    use_cache=False  # 确保每次计算完整forward
+                    use_cache=False  # 确保每次完整forward
                 )
             torch.cuda.synchronize()
             end_total = time.time()
             
             total_latency = end_total - start_total
             
-            # 计算MoE层latency
-            # 已有moe_layer_time与normal_layer_time
-            # MoE层latency = moe_layer_time
-            # 普通Transformer层latency = normal_layer_time
-            # 总latency = total_latency
-
             moe_times.append(moe_layer_time)
             normal_times.append(normal_layer_time)
             total_times.append(total_latency)
 
-            print(f"请求长度 {pl} 完成：")
+            print(f"请求: {req}")
+            print(f"请求长度 {req_length} 完成：")
             print(f"  MoE总延迟   {moe_layer_time:.4f}s")
             print(f"  普通层总延迟 {normal_layer_time:.4f}s")
             print(f"  整个预测过程延迟 {total_latency:.4f}s")
-
-        # 绘制第一张图：MoE层latency，普通层latency和总latency随请求长度变化
+        
+        # 绘制图表1：MoE层latency，普通层latency和总latency随请求长度变化
         plt.figure(figsize=(10, 6))
-        plt.plot(prompt_lengths, moe_times, label='MoE Layers Latency', marker='o')
-        plt.plot(prompt_lengths, normal_times, label='Normal Transformer Layers Latency', marker='s')
-        plt.plot(prompt_lengths, total_times, label='Total Inference Latency', marker='^')
-        plt.xlabel("Request Length")
+        plt.plot(request_lengths, moe_times, label='MoE Layers Latency', marker='o')
+        plt.plot(request_lengths, normal_times, label='Normal Transformer Layers Latency', marker='s')
+        plt.plot(request_lengths, total_times, label='Total Inference Latency', marker='^')
+        plt.xlabel("Request Length (number of tokens)")
         plt.ylabel("Latency (seconds)")
         plt.title("MoE vs Normal Transformer Layers vs Total Latency")
         plt.legend()
@@ -150,12 +151,12 @@ def main():
         plt.savefig("moe_normal_total_latency.png")
         plt.show()
 
-        # 绘制第二张图：MoE层latency在整个预测延迟中的占比
+        # 绘制图表2：MoE层latency在整个预测延迟中的占比
         ratio = [ (m / t) * 100.0 if t > 0 else 0.0 for m, t in zip(moe_times, total_times) ]
         
         plt.figure(figsize=(10, 6))
-        plt.plot(prompt_lengths, ratio, label='MoE Latency Percentage', marker='o')
-        plt.xlabel("Request Length")
+        plt.plot(request_lengths, ratio, label='MoE Latency Percentage', marker='o')
+        plt.xlabel("Request Length (number of tokens)")
         plt.ylabel("MoE Latency Percentage (%)")
         plt.title("MoE Latency Share in Total Inference Latency")
         plt.grid(True)
