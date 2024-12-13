@@ -22,7 +22,7 @@ def main():
         
         # 加载分词器
         tokenizer = AutoTokenizer.from_pretrained(
-            "/vllm-workspace/MoE_MotivationTest/huggingfaceM87Bv01",
+            "/vllm-workspace/huggingfaceM87Bv01/Mixtral-8x7B-v0.1",
             token=token
         )
         
