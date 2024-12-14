@@ -153,6 +153,8 @@ def main():
                     repetition_penalty=1.1,
                     use_cache=False
                 )
+                print(outputs)
+                 
             total_end.record()
             total_end.synchronize()
 
