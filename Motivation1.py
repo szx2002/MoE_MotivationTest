@@ -49,8 +49,11 @@ def main():
         
         print("模型加载完成！")
         
-        for name, layer_module in model.model.layers.named_children():
-            print(f"Layer: {name}, Class: {layer_module.__class__.__name__}")
+        for i, layer_module in enumerate(model.model.layers):
+            print(f"Layer {i}, Class: {layer_module.__class__.__name__}")
+            for sub_name, sub_module in layer_module.named_modules():
+                print(f"  Sub-module name: {sub_name}, class: {sub_module.__class__.__name__}")
+
 
         # 放宽MoE层判断标准
         # 如果层名或类名中包含 "moe", "block_sparse_moe", 或 "experts" 则认为是moe层
