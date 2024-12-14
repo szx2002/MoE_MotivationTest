@@ -49,37 +49,45 @@ def main():
         
         print("模型加载完成！")
         
-        # 根据实际情况修改判断是否为MoE层的逻辑
-        def is_moe_layer(layer_module):
-            class_name_lower = layer_module.__class__.__name__.lower()
-            return "moe" in class_name_lower
+        # 放宽MoE层判断标准
+        # 如果层名或类名中包含 "moe", "block_sparse_moe", 或 "experts" 则认为是moe层
+        def is_moe(name, module):
+            name_lower = name.lower()
+            class_name_lower = module.__class__.__name__.lower()
+            # 根据已知weight_map中的特征，如 "block_sparse_moe" 和 "experts"
+            # 如果层的名称或类名中出现这些字样，则认定为MoE层
+            moe_keywords = ["moe", "block_sparse_moe", "experts"]
+            return any(kw in name_lower for kw in moe_keywords) or any(kw in class_name_lower for kw in moe_keywords)
         
-        moe_layer_time = 0.0
-        normal_layer_time = 0.0
+        total_transformer_time = 0.0
+        normal_transformer_time = 0.0
         layer_start_times = {}
 
-        def make_pre_hook(module_is_moe):
+        def make_pre_hook(module_id):
             def forward_pre_hook(module, inp):
                 torch.cuda.synchronize()
-                layer_start_times[id(module)] = time.time()
+                layer_start_times[module_id] = time.time()
             return forward_pre_hook
 
-        def make_post_hook(module_is_moe):
+        def make_post_hook(module_id, module_is_moe):
             def forward_hook(module, inp, out):
                 torch.cuda.synchronize()
-                elapsed = time.time() - layer_start_times[id(module)]
-                nonlocal moe_layer_time, normal_layer_time
-                if module_is_moe:
-                    moe_layer_time += elapsed
-                else:
-                    normal_layer_time += elapsed
+                elapsed = time.time() - layer_start_times[module_id]
+                nonlocal total_transformer_time, normal_transformer_time
+                # 所有transformer层计入total_transformer_time
+                total_transformer_time += elapsed
+                # 非MoE层计入normal_transformer_time
+                if not module_is_moe:
+                    normal_transformer_time += elapsed
             return forward_hook
 
-        # 对model.model.layers中的每个transformer层注册hook
-        for i, layer_module in enumerate(model.model.layers):
-            module_is_moe = is_moe_layer(layer_module)
-            layer_module.register_forward_pre_hook(make_pre_hook(module_is_moe))
-            layer_module.register_forward_hook(make_post_hook(module_is_moe))
+        # 对 model.model.layers 下的每个子模块(层)进行注册
+        # 使用 named_children() 来同时获取 name 和 module
+        for name, layer_module in model.model.layers.named_children():
+            module_id = id(layer_module)
+            module_is_moe = is_moe(name, layer_module)
+            layer_module.register_forward_pre_hook(make_pre_hook(module_id))
+            layer_module.register_forward_hook(make_post_hook(module_id, module_is_moe))
         
         # 从文件中读取请求
         input_file = "requests.txt"
@@ -90,7 +98,6 @@ def main():
                 if req:
                     requests.append(req)
         
-        # 分别对每个请求进行推理并计时
         request_lengths = []
         moe_times = []
         normal_times = []
@@ -103,8 +110,8 @@ def main():
             request_lengths.append(req_length)
 
             # 重置计时统计
-            moe_layer_time = 0.0
-            normal_layer_time = 0.0
+            total_transformer_time = 0.0
+            normal_transformer_time = 0.0
             layer_start_times.clear()
             
             inputs = tokenizer(req, return_tensors="pt").to("cuda")
@@ -128,14 +135,16 @@ def main():
             
             total_latency = end_total - start_total
             
+            # 通过差值计算moe层延迟
+            moe_layer_time = total_transformer_time - normal_transformer_time
+            
             moe_times.append(moe_layer_time)
-            normal_times.append(normal_layer_time)
+            normal_times.append(normal_transformer_time)
             total_times.append(total_latency)
 
-            print(f"请求: {req}")
             print(f"请求长度 {req_length} 完成：")
-            print(f"  MoE总延迟   {moe_layer_time:.4f}s")
-            print(f"  普通层总延迟 {normal_layer_time:.4f}s")
+            print(f"  MoE总延迟   {moe_layer_time:.4f}s (通过差值得出)")
+            print(f"  普通层总延迟 {normal_transformer_time:.4f}s")
             print(f"  整个预测过程延迟 {total_latency:.4f}s")
         
         # 绘制图表1：MoE层latency，普通层latency和总latency随请求长度变化
@@ -152,7 +161,7 @@ def main():
         plt.show()
 
         # 绘制图表2：MoE层latency在整个预测延迟中的占比
-        ratio = [ (m / t) * 100.0 if t > 0 else 0.0 for m, t in zip(moe_times, total_times) ]
+        ratio = [(m / t) * 100.0 if t > 0 else 0.0 for m, t in zip(moe_times, total_times)]
         
         plt.figure(figsize=(10, 6))
         plt.plot(request_lengths, ratio, label='MoE Latency Percentage', marker='o')
