@@ -12,7 +12,6 @@ def main():
     login(token)
     
     print("开始加载模型...")
-    
     try:
         # 使用4-bit量化配置
         quantization_config = BitsAndBytesConfig(
@@ -48,20 +47,16 @@ def main():
         )
         
         print("模型加载完成！")
-        
-        for i, layer_module in enumerate(model.model.layers):
-            print(f"Layer {i}, Class: {layer_module.__class__.__name__}")
-            for sub_name, sub_module in layer_module.named_modules():
-                print(f"  Sub-module name: {sub_name}, class: {sub_module.__class__.__name__}")
 
-
-        # 放宽MoE层判断标准
-        # 如果层名或类名中包含 "moe", "block_sparse_moe", 或 "experts" 则认为是moe层
-        def is_moe(name, module):
+        # 定义判断moe层的函数
+        # 从打印信息来看，"block_sparse_moe" 子模块为MoE的特征
+        def is_moe_layer(name, module):
+            # 若子模块名称中包含block_sparse_moe则认为是MoE层
             name_lower = name.lower()
-            class_name_lower = module.__class__.__name__.lower()
-            moe_keywords = ["moe", "block_sparse_moe", "experts"]
-            return any(kw in name_lower for kw in moe_keywords) or any(kw in class_name_lower for kw in moe_keywords)
+            # 我们还可以根据experts字段进一步确认
+            # 因为 experts 模块位于 block_sparse_moe 下方，也表示MoE特性
+            moe_keywords = ["block_sparse_moe", "experts"]
+            return any(kw in name_lower for kw in moe_keywords)
         
         total_transformer_runtime = 0.0
         normal_transformer_runtime = 0.0
@@ -88,24 +83,33 @@ def main():
                 total_transformer_runtime += elapsed
                 if module_is_moe:
                     moe_transformer_runtime += elapsed
-                    # 如果还没有记录moe层名字，就记录这一次的
                     if first_moe_layer_name is None:
                         first_moe_layer_name = layer_name
                 else:
                     normal_transformer_runtime += elapsed
-                    # 如果还没有记录普通层名字，就记录这一次的
                     if first_normal_layer_name is None:
                         first_normal_layer_name = layer_name
             return forward_hook
 
-        # 注册hook
-        # 同时保留层的名称以便在forward_hook中打印
-        for name, layer_module in model.model.layers.named_children():
-            module_id = id(layer_module)
-            module_is_moe = is_moe(name, layer_module)
-            layer_module.register_forward_pre_hook(make_pre_hook(module_id))
-            layer_module.register_forward_hook(make_post_hook(module_id, module_is_moe, name))
-        
+        # 对每一层递归搜索子模块并注册hook
+        # MoE层为 block_sparse_moe 模块，普通层则不包含该关键词
+        def register_hooks_for_submodules(parent_module, parent_name=""):
+            for name, sub_module in parent_module.named_children():
+                full_name = f"{parent_name}.{name}" if parent_name else name
+                module_is_moe = is_moe_layer(full_name, sub_module)
+                # 为每个子模块注册hook
+                sub_module.register_forward_pre_hook(make_pre_hook(id(sub_module)))
+                sub_module.register_forward_hook(make_post_hook(id(sub_module), module_is_moe, full_name))
+                # 递归处理子模块
+                register_hooks_for_submodules(sub_module, full_name)
+
+        # 对 model.model.layers 中的每个Layer递归注册
+        for i, layer_module in enumerate(model.model.layers):
+            layer_name = f"layer_{i}"
+            # 每个MixtralDecoderLayer本身也是一个模块容器
+            # 我们可以对其下所有子模块进行递归hook
+            register_hooks_for_submodules(layer_module, layer_name)
+
         # 从文件中读取请求
         input_file = "requests.txt"
         requests = []
