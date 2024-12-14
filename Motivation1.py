@@ -62,34 +62,43 @@ def main():
         moe_transformer_runtime = 0.0
         layer_start_times = {}
 
+        # 记录首次出现的moe层和普通层名称
+        first_moe_layer_name = None
+        first_normal_layer_name = None
+
         def make_pre_hook(module_id):
             def forward_pre_hook(module, inp):
                 torch.cuda.synchronize()
                 layer_start_times[module_id] = time.time()
             return forward_pre_hook
 
-        def make_post_hook(module_id, module_is_moe):
+        def make_post_hook(module_id, module_is_moe, layer_name):
             def forward_hook(module, inp, out):
                 torch.cuda.synchronize()
                 elapsed = time.time() - layer_start_times[module_id]
                 nonlocal total_transformer_runtime, normal_transformer_runtime, moe_transformer_runtime
+                nonlocal first_moe_layer_name, first_normal_layer_name
 
-                # 所有transformer层计入 total_transformer_runtime
                 total_transformer_runtime += elapsed
-                # MoE层计入 moe_transformer_runtime
-                # 普通层计入 normal_transformer_runtime
                 if module_is_moe:
                     moe_transformer_runtime += elapsed
+                    # 如果还没有记录moe层名字，就记录这一次的
+                    if first_moe_layer_name is None:
+                        first_moe_layer_name = layer_name
                 else:
                     normal_transformer_runtime += elapsed
+                    # 如果还没有记录普通层名字，就记录这一次的
+                    if first_normal_layer_name is None:
+                        first_normal_layer_name = layer_name
             return forward_hook
 
         # 注册hook
+        # 同时保留层的名称以便在forward_hook中打印
         for name, layer_module in model.model.layers.named_children():
             module_id = id(layer_module)
             module_is_moe = is_moe(name, layer_module)
             layer_module.register_forward_pre_hook(make_pre_hook(module_id))
-            layer_module.register_forward_hook(make_post_hook(module_id, module_is_moe))
+            layer_module.register_forward_hook(make_post_hook(module_id, module_is_moe, name))
         
         # 从文件中读取请求
         input_file = "requests.txt"
@@ -110,11 +119,13 @@ def main():
             req_length = input_ids.shape[1]  # token数
             request_lengths.append(req_length)
 
-            # 重置计时统计
+            # 重置计时与首层名称记录
             total_transformer_runtime = 0.0
             normal_transformer_runtime = 0.0
             moe_transformer_runtime = 0.0
             layer_start_times.clear()
+            first_moe_layer_name = None
+            first_normal_layer_name = None
             
             inputs = tokenizer(req, return_tensors="pt").to("cuda")
 
@@ -142,6 +153,8 @@ def main():
             total_times.append(total_runtime)
 
             print(f"请求长度 {req_length} 完成：")
+            print(f"  第一个MoE层: {first_moe_layer_name if first_moe_layer_name else '无MoE层'}")
+            print(f"  第一个普通层: {first_normal_layer_name if first_normal_layer_name else '无普通层'}")
             print(f"  MoE层运行时间   {moe_transformer_runtime:.4f}s")
             print(f"  普通层运行时间 {normal_transformer_runtime:.4f}s")
             print(f"  整个预测过程运行时间 {total_runtime:.4f}s")
