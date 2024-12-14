@@ -48,35 +48,41 @@ def main():
         
         print("模型加载完成！")
 
-        # 定义判断moe层的函数
-        # 从打印信息来看，"block_sparse_moe" 子模块为MoE的特征
+        # 从打印信息知晓moe层关键字为 "block_sparse_moe" 等
         def is_moe_layer(name, module):
-            # 若子模块名称中包含block_sparse_moe则认为是MoE层
             name_lower = name.lower()
-            # 我们还可以根据experts字段进一步确认
-            # 因为 experts 模块位于 block_sparse_moe 下方，也表示MoE特性
             moe_keywords = ["block_sparse_moe", "experts"]
             return any(kw in name_lower for kw in moe_keywords)
         
         total_transformer_runtime = 0.0
         normal_transformer_runtime = 0.0
         moe_transformer_runtime = 0.0
-        layer_start_times = {}
-
+        
         # 记录首次出现的moe层和普通层名称
         first_moe_layer_name = None
         first_normal_layer_name = None
+        
+        layer_start_events = {}
 
         def make_pre_hook(module_id):
             def forward_pre_hook(module, inp):
-                torch.cuda.synchronize()
-                layer_start_times[module_id] = time.time()
+                # 创建并记录开始事件
+                start_event = torch.cuda.Event(enable_timing=True)
+                start_event.record()
+                layer_start_events[module_id] = start_event
             return forward_pre_hook
 
         def make_post_hook(module_id, module_is_moe, layer_name):
             def forward_hook(module, inp, out):
-                torch.cuda.synchronize()
-                elapsed = time.time() - layer_start_times[module_id]
+                end_event = torch.cuda.Event(enable_timing=True)
+                end_event.record()
+                # 等待end_event完成
+                end_event.synchronize()
+                start_event = layer_start_events[module_id]
+                # 计算耗时（ms），转换为秒
+                elapsed_ms = start_event.elapsed_time(end_event)  # 毫秒
+                elapsed = elapsed_ms / 1000.0  # 转换成秒
+                
                 nonlocal total_transformer_runtime, normal_transformer_runtime, moe_transformer_runtime
                 nonlocal first_moe_layer_name, first_normal_layer_name
 
@@ -91,26 +97,19 @@ def main():
                         first_normal_layer_name = layer_name
             return forward_hook
 
-        # 对每一层递归搜索子模块并注册hook
-        # MoE层为 block_sparse_moe 模块，普通层则不包含该关键词
+        # 递归为子模块注册hook
         def register_hooks_for_submodules(parent_module, parent_name=""):
             for name, sub_module in parent_module.named_children():
                 full_name = f"{parent_name}.{name}" if parent_name else name
                 module_is_moe = is_moe_layer(full_name, sub_module)
-                # 为每个子模块注册hook
                 sub_module.register_forward_pre_hook(make_pre_hook(id(sub_module)))
                 sub_module.register_forward_hook(make_post_hook(id(sub_module), module_is_moe, full_name))
-                # 递归处理子模块
                 register_hooks_for_submodules(sub_module, full_name)
 
-        # 对 model.model.layers 中的每个Layer递归注册
         for i, layer_module in enumerate(model.model.layers):
             layer_name = f"layer_{i}"
-            # 每个MixtralDecoderLayer本身也是一个模块容器
-            # 我们可以对其下所有子模块进行递归hook
             register_hooks_for_submodules(layer_module, layer_name)
 
-        # 从文件中读取请求
         input_file = "requests.txt"
         requests = []
         with open(input_file, 'r', encoding='utf-8') as f:
@@ -129,19 +128,20 @@ def main():
             req_length = input_ids.shape[1]  # token数
             request_lengths.append(req_length)
 
-            # 重置计时与首层名称记录
             total_transformer_runtime = 0.0
             normal_transformer_runtime = 0.0
             moe_transformer_runtime = 0.0
-            layer_start_times.clear()
             first_moe_layer_name = None
             first_normal_layer_name = None
+            layer_start_events.clear()
             
             inputs = tokenizer(req, return_tensors="pt").to("cuda")
 
-            # 计时整个预测过程
-            torch.cuda.synchronize()
-            start_total = time.time()
+            # 使用CUDA事件计时整体预测时间
+            total_start = torch.cuda.Event(enable_timing=True)
+            total_end = torch.cuda.Event(enable_timing=True)
+
+            total_start.record()
             with torch.inference_mode():
                 outputs = model.generate(
                     **inputs,
@@ -153,11 +153,12 @@ def main():
                     repetition_penalty=1.1,
                     use_cache=False
                 )
-            torch.cuda.synchronize()
-            end_total = time.time()
-            
-            total_runtime = end_total - start_total
-            
+            total_end.record()
+            total_end.synchronize()
+
+            total_runtime_ms = total_start.elapsed_time(total_end)
+            total_runtime = total_runtime_ms / 1000.0
+
             moe_times.append(moe_transformer_runtime)
             normal_times.append(normal_transformer_runtime)
             total_times.append(total_runtime)
@@ -168,8 +169,7 @@ def main():
             print(f"  MoE层运行时间   {moe_transformer_runtime:.4f}s")
             print(f"  普通层运行时间 {normal_transformer_runtime:.4f}s")
             print(f"  整个预测过程运行时间 {total_runtime:.4f}s")
-        
-        # 绘制图表1：MoE层、普通层、总预测过程运行时间随请求长度变化
+
         plt.figure(figsize=(10, 6))
         plt.plot(request_lengths, moe_times, label='MoE Layers Runtime', marker='o')
         plt.plot(request_lengths, normal_times, label='Normal Transformer Layers Runtime', marker='s')
@@ -182,9 +182,7 @@ def main():
         plt.savefig("moe_normal_total_runtime.png")
         plt.show()
 
-        # 绘制图表2：MoE层运行时间在整个预测过程中的占比
         ratio = [(m / t) * 100.0 if t > 0 else 0.0 for m, t in zip(moe_times, total_times)]
-        
         plt.figure(figsize=(10, 6))
         plt.plot(request_lengths, ratio, label='MoE Runtime Percentage', marker='o')
         plt.xlabel("Request Length (number of tokens)")
@@ -209,7 +207,6 @@ if __name__ == "__main__":
         print(f"当前显存使用: {torch.cuda.memory_allocated()/1024**2:.2f} MB")
         print(f"显存总量: {torch.cuda.get_device_properties(0).total_memory/1024**2:.0f} MB")
     
-    # 确保 bitsandbytes 正确安装
     try:
         import bitsandbytes as bnb
         print(f"bitsandbytes 版本: {bnb.__version__}")
