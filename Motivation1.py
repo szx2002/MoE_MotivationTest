@@ -54,13 +54,12 @@ def main():
         def is_moe(name, module):
             name_lower = name.lower()
             class_name_lower = module.__class__.__name__.lower()
-            # 根据已知weight_map中的特征，如 "block_sparse_moe" 和 "experts"
-            # 如果层的名称或类名中出现这些字样，则认定为MoE层
             moe_keywords = ["moe", "block_sparse_moe", "experts"]
             return any(kw in name_lower for kw in moe_keywords) or any(kw in class_name_lower for kw in moe_keywords)
         
-        total_transformer_time = 0.0
-        normal_transformer_time = 0.0
+        total_transformer_runtime = 0.0
+        normal_transformer_runtime = 0.0
+        moe_transformer_runtime = 0.0
         layer_start_times = {}
 
         def make_pre_hook(module_id):
@@ -73,16 +72,19 @@ def main():
             def forward_hook(module, inp, out):
                 torch.cuda.synchronize()
                 elapsed = time.time() - layer_start_times[module_id]
-                nonlocal total_transformer_time, normal_transformer_time
-                # 所有transformer层计入total_transformer_time
-                total_transformer_time += elapsed
-                # 非MoE层计入normal_transformer_time
-                if not module_is_moe:
-                    normal_transformer_time += elapsed
+                nonlocal total_transformer_runtime, normal_transformer_runtime, moe_transformer_runtime
+
+                # 所有transformer层计入 total_transformer_runtime
+                total_transformer_runtime += elapsed
+                # MoE层计入 moe_transformer_runtime
+                # 普通层计入 normal_transformer_runtime
+                if module_is_moe:
+                    moe_transformer_runtime += elapsed
+                else:
+                    normal_transformer_runtime += elapsed
             return forward_hook
 
-        # 对 model.model.layers 下的每个子模块(层)进行注册
-        # 使用 named_children() 来同时获取 name 和 module
+        # 注册hook
         for name, layer_module in model.model.layers.named_children():
             module_id = id(layer_module)
             module_is_moe = is_moe(name, layer_module)
@@ -104,14 +106,14 @@ def main():
         total_times = []
 
         for req in requests:
-            # 对请求分词后获取长度
             input_ids = tokenizer(req, return_tensors="pt").input_ids
             req_length = input_ids.shape[1]  # token数
             request_lengths.append(req_length)
 
             # 重置计时统计
-            total_transformer_time = 0.0
-            normal_transformer_time = 0.0
+            total_transformer_runtime = 0.0
+            normal_transformer_runtime = 0.0
+            moe_transformer_runtime = 0.0
             layer_start_times.clear()
             
             inputs = tokenizer(req, return_tensors="pt").to("cuda")
@@ -128,48 +130,45 @@ def main():
                     temperature=0.7,
                     top_p=0.95,
                     repetition_penalty=1.1,
-                    use_cache=False  # 确保每次完整forward
+                    use_cache=False
                 )
             torch.cuda.synchronize()
             end_total = time.time()
             
-            total_latency = end_total - start_total
+            total_runtime = end_total - start_total
             
-            # 通过差值计算moe层延迟
-            moe_layer_time = total_transformer_time - normal_transformer_time
-            
-            moe_times.append(moe_layer_time)
-            normal_times.append(normal_transformer_time)
-            total_times.append(total_latency)
+            moe_times.append(moe_transformer_runtime)
+            normal_times.append(normal_transformer_runtime)
+            total_times.append(total_runtime)
 
             print(f"请求长度 {req_length} 完成：")
-            print(f"  MoE总延迟   {moe_layer_time:.4f}s (通过差值得出)")
-            print(f"  普通层总延迟 {normal_transformer_time:.4f}s")
-            print(f"  整个预测过程延迟 {total_latency:.4f}s")
+            print(f"  MoE层运行时间   {moe_transformer_runtime:.4f}s")
+            print(f"  普通层运行时间 {normal_transformer_runtime:.4f}s")
+            print(f"  整个预测过程运行时间 {total_runtime:.4f}s")
         
-        # 绘制图表1：MoE层latency，普通层latency和总latency随请求长度变化
+        # 绘制图表1：MoE层、普通层、总预测过程运行时间随请求长度变化
         plt.figure(figsize=(10, 6))
-        plt.plot(request_lengths, moe_times, label='MoE Layers Latency', marker='o')
-        plt.plot(request_lengths, normal_times, label='Normal Transformer Layers Latency', marker='s')
-        plt.plot(request_lengths, total_times, label='Total Inference Latency', marker='^')
+        plt.plot(request_lengths, moe_times, label='MoE Layers Runtime', marker='o')
+        plt.plot(request_lengths, normal_times, label='Normal Transformer Layers Runtime', marker='s')
+        plt.plot(request_lengths, total_times, label='Total Inference Runtime', marker='^')
         plt.xlabel("Request Length (number of tokens)")
-        plt.ylabel("Latency (seconds)")
-        plt.title("MoE vs Normal Transformer Layers vs Total Latency")
+        plt.ylabel("Runtime (seconds)")
+        plt.title("MoE vs Normal Transformer Layers vs Total Runtime")
         plt.legend()
         plt.grid(True)
-        plt.savefig("moe_normal_total_latency.png")
+        plt.savefig("moe_normal_total_runtime.png")
         plt.show()
 
-        # 绘制图表2：MoE层latency在整个预测延迟中的占比
+        # 绘制图表2：MoE层运行时间在整个预测过程中的占比
         ratio = [(m / t) * 100.0 if t > 0 else 0.0 for m, t in zip(moe_times, total_times)]
         
         plt.figure(figsize=(10, 6))
-        plt.plot(request_lengths, ratio, label='MoE Latency Percentage', marker='o')
+        plt.plot(request_lengths, ratio, label='MoE Runtime Percentage', marker='o')
         plt.xlabel("Request Length (number of tokens)")
-        plt.ylabel("MoE Latency Percentage (%)")
-        plt.title("MoE Latency Share in Total Inference Latency")
+        plt.ylabel("MoE Runtime Percentage (%)")
+        plt.title("MoE Runtime Share in Total Inference Runtime")
         plt.grid(True)
-        plt.savefig("moe_latency_percentage.png")
+        plt.savefig("moe_runtime_percentage.png")
         plt.show()
 
     except Exception as e:
