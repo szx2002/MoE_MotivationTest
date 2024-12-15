@@ -134,7 +134,6 @@ def main():
                     top_p=0.95,
                     repetition_penalty=1.1,
                     use_cache=False,
-                    return_dict_in_generate=True
                 )
                 print(outputs)
                  
