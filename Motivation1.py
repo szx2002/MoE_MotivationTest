@@ -145,7 +145,7 @@ def main():
             total_runtime = total_runtime_ms / 1000.0
 
             # 使用 outputs['latency'] 作为 MoE 层的 latency
-            moe_transformer_runtime = outputs.get("latency", 0.0)
+            moe_transformer_runtime = outputs.get("moe_latency", 0.0)
 
             moe_times.append(moe_transformer_runtime)
             normal_times.append(normal_transformer_runtime)
@@ -158,7 +158,7 @@ def main():
             print(f"  整个预测过程运行时间: {total_runtime:.4f}s")
 
         plt.figure(figsize=(10, 6))
-        plt.plot(request_lengths, moe_times, label='MoE Layers Runtime (from outputs["latency"])', marker='o')
+        plt.plot(request_lengths, moe_times, label='MoE Layers Runtime (from outputs["moe_latency"])', marker='o')
         plt.plot(request_lengths, normal_times, label='Normal Transformer Layers Runtime', marker='s')
         plt.plot(request_lengths, total_times, label='Total Inference Runtime', marker='^')
         plt.xlabel("Request Length (number of tokens)")
