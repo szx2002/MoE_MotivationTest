@@ -48,18 +48,8 @@ def main():
         
         print("模型加载完成！")
 
-        # 从打印信息知晓moe层关键字为 "block_sparse_moe" 等
-        def is_moe_layer(name, module):
-            name_lower = name.lower()
-            moe_keywords = ["block_sparse_moe", "experts"]
-            return any(kw in name_lower for kw in moe_keywords)
-        
         total_transformer_runtime = 0.0
         normal_transformer_runtime = 0.0
-        moe_transformer_runtime = 0.0
-        
-        # 记录首次出现的moe层和普通层名称
-        first_moe_layer_name = None
         first_normal_layer_name = None
         
         layer_start_events = {}
@@ -72,38 +62,31 @@ def main():
                 layer_start_events[module_id] = start_event
             return forward_pre_hook
 
-        def make_post_hook(module_id, module_is_moe, layer_name):
+        def make_post_hook(module_id, layer_name):
             def forward_hook(module, inp, out):
                 end_event = torch.cuda.Event(enable_timing=True)
                 end_event.record()
                 # 等待end_event完成
                 end_event.synchronize()
                 start_event = layer_start_events[module_id]
-                # 计算耗时（ms），转换为秒
                 elapsed_ms = start_event.elapsed_time(end_event)  # 毫秒
                 elapsed = elapsed_ms / 1000.0  # 转换成秒
-                
-                nonlocal total_transformer_runtime, normal_transformer_runtime, moe_transformer_runtime
-                nonlocal first_moe_layer_name, first_normal_layer_name
+
+                nonlocal total_transformer_runtime, normal_transformer_runtime
+                nonlocal first_normal_layer_name
 
                 total_transformer_runtime += elapsed
-                if module_is_moe:
-                    moe_transformer_runtime += elapsed
-                    if first_moe_layer_name is None:
-                        first_moe_layer_name = layer_name
-                else:
-                    normal_transformer_runtime += elapsed
-                    if first_normal_layer_name is None:
-                        first_normal_layer_name = layer_name
+                normal_transformer_runtime += elapsed
+                if first_normal_layer_name is None:
+                    first_normal_layer_name = layer_name
             return forward_hook
 
-        # 递归为子模块注册hook
+        # 为每一层中的子模块注册hook（只为普通层）
         def register_hooks_for_submodules(parent_module, parent_name=""):
             for name, sub_module in parent_module.named_children():
                 full_name = f"{parent_name}.{name}" if parent_name else name
-                module_is_moe = is_moe_layer(full_name, sub_module)
                 sub_module.register_forward_pre_hook(make_pre_hook(id(sub_module)))
-                sub_module.register_forward_hook(make_post_hook(id(sub_module), module_is_moe, full_name))
+                sub_module.register_forward_hook(make_post_hook(id(sub_module), full_name))
                 register_hooks_for_submodules(sub_module, full_name)
 
         for i, layer_module in enumerate(model.model.layers):
@@ -130,8 +113,6 @@ def main():
 
             total_transformer_runtime = 0.0
             normal_transformer_runtime = 0.0
-            moe_transformer_runtime = 0.0
-            first_moe_layer_name = None
             first_normal_layer_name = None
             layer_start_events.clear()
             
@@ -143,6 +124,7 @@ def main():
 
             total_start.record()
             with torch.inference_mode():
+                # 假设 outputs 中包含 'latency' 键
                 outputs = model.generate(
                     **inputs,
                     max_new_tokens=1,
@@ -151,7 +133,8 @@ def main():
                     temperature=0.7,
                     top_p=0.95,
                     repetition_penalty=1.1,
-                    use_cache=False
+                    use_cache=False,
+                    return_dict_in_generate=True
                 )
                 print(outputs)
                  
@@ -161,19 +144,21 @@ def main():
             total_runtime_ms = total_start.elapsed_time(total_end)
             total_runtime = total_runtime_ms / 1000.0
 
+            # 使用 outputs['latency'] 作为 MoE 层的 latency
+            moe_transformer_runtime = outputs.get("latency", 0.0)
+
             moe_times.append(moe_transformer_runtime)
             normal_times.append(normal_transformer_runtime)
             total_times.append(total_runtime)
 
             print(f"请求长度 {req_length} 完成：")
-            print(f"  第一个MoE层: {first_moe_layer_name if first_moe_layer_name else '无MoE层'}")
             print(f"  第一个普通层: {first_normal_layer_name if first_normal_layer_name else '无普通层'}")
-            print(f"  MoE层运行时间   {moe_transformer_runtime:.4f}s")
-            print(f"  普通层运行时间 {normal_transformer_runtime:.4f}s")
-            print(f"  整个预测过程运行时间 {total_runtime:.4f}s")
+            print(f"  使用outputs中latency记录的MoE层运行时间: {moe_transformer_runtime:.4f}s")
+            print(f"  普通层运行时间: {normal_transformer_runtime:.4f}s")
+            print(f"  整个预测过程运行时间: {total_runtime:.4f}s")
 
         plt.figure(figsize=(10, 6))
-        plt.plot(request_lengths, moe_times, label='MoE Layers Runtime', marker='o')
+        plt.plot(request_lengths, moe_times, label='MoE Layers Runtime (from outputs["latency"])', marker='o')
         plt.plot(request_lengths, normal_times, label='Normal Transformer Layers Runtime', marker='s')
         plt.plot(request_lengths, total_times, label='Total Inference Runtime', marker='^')
         plt.xlabel("Request Length (number of tokens)")
