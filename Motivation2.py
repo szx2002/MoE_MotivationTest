@@ -57,8 +57,6 @@ def main():
         
         def expert_hook(layer_name):
             def hook(module, inp, out):
-                print(f"MoE Layer activated: {layer_name}")
-                # 记录激活的 Expert 索引
                 for expert_name, expert_module in module.named_modules():
                     if "experts" in expert_name:
                         expert_idx = int(expert_name.split(".")[-3])
@@ -69,7 +67,6 @@ def main():
             for name, sub_module in parent_module.named_children():
                 full_name = f"{parent_name}.{name}" if parent_name else name
                 if is_moe_layer(full_name, sub_module):
-                    print(f"Registering hook for MoE Layer: {full_name}")
                     sub_module.register_forward_hook(expert_hook(full_name))
                 register_hooks_for_submodules(sub_module, full_name)
         
@@ -89,7 +86,7 @@ def main():
             inputs = tokenizer(req, return_tensors="pt").to("cuda")
             
             with torch.inference_mode():
-                outputs = model.generate(
+                model.generate(
                     **inputs,
                     max_new_tokens=1,
                     num_return_sequences=1,
@@ -100,10 +97,11 @@ def main():
                     use_cache=False
                 )
             
-            print(f"\n请求 {req_idx + 1}: {req}")
-            print("各层被激活的 Experts:\n")
+            total_activated_experts = sum(len(experts) for experts in activated_experts_per_layer.values())
+            print(f"\n请求 {req_idx + 1}:")
             for layer_name, experts in sorted(activated_experts_per_layer.items()):
-                print(f"{layer_name}: Experts {sorted(experts)}")
+                print(f"  {layer_name}: {len(experts)} 个 Experts 激活")
+            print(f"  激活的 Experts 总数: {total_activated_experts}")
         
     except Exception as e:
         print(f"错误: {str(e)}")
