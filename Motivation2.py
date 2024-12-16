@@ -3,7 +3,6 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 from huggingface_hub import login
 import warnings
-from collections import defaultdict
 
 warnings.filterwarnings('ignore')
 
@@ -48,39 +47,6 @@ def main():
         
         print("模型加载完成！")
         
-        # 出现的Expert统计
-        activated_experts_per_layer = defaultdict(set)
-        
-        def is_moe_layer(name, module):
-            # 修改匹配规则，确保识别 MoE 层
-            return "block_sparse_moe" in name and "experts" in name
-        
-        def expert_hook(layer_name):
-            def hook(module, inp, out):
-                # 解析层号和专家号
-                parts = layer_name.split(".")
-                layer_idx = None
-                expert_idx = None
-                for i, part in enumerate(parts):
-                    if part == "layers":
-                        layer_idx = int(parts[i + 1])
-                    if part == "experts":
-                        expert_idx = int(parts[i + 1])
-                
-                if layer_idx is not None and expert_idx is not None:
-                    activated_experts_per_layer[layer_idx].add(expert_idx)
-            return hook
-        
-        def register_hooks_for_submodules(parent_module, parent_name=""):
-            for name, sub_module in parent_module.named_children():
-                full_name = f"{parent_name}.{name}" if parent_name else name
-                if is_moe_layer(full_name, sub_module):
-                    sub_module.register_forward_hook(expert_hook(full_name))
-                register_hooks_for_submodules(sub_module, full_name)
-        
-        # 注册 Hook
-        register_hooks_for_submodules(model)
-
         input_file = "requests.txt"
         requests = []
         with open(input_file, 'r', encoding='utf-8') as f:
@@ -89,28 +55,39 @@ def main():
                 if req:
                     requests.append(req)
         
-        for req_idx, req in enumerate(requests):
-            activated_experts_per_layer.clear()
+        # 仅处理前两个请求
+        for req_idx, req in enumerate(requests[:2]):
             inputs = tokenizer(req, return_tensors="pt").to("cuda")
             
             with torch.inference_mode():
-                model.generate(
+                outputs = model(
                     **inputs,
-                    max_new_tokens=1,
-                    num_return_sequences=1,
-                    do_sample=False,
-                    temperature=0.7,
-                    top_p=0.95,
-                    repetition_penalty=1.1,
-                    use_cache=False
+                    output_router_logits=True,  # 启用路由器 logits 输出
+                    return_dict=True
                 )
             
-            total_activated_experts = sum(len(experts) for experts in activated_experts_per_layer.values())
-            print(f"\n请求 {req_idx + 1}:")
-            print("各层被激活的 Experts 数量:\n")
-            for layer_idx, experts in sorted(activated_experts_per_layer.items()):
-                print(f"Layer {layer_idx}: {len(experts)} 个 Experts 激活")
-            print(f"激活的 Experts 总数: {total_activated_experts}")
+            router_logits = outputs.router_logits
+            # 确认 router_logits 的形状
+            print("router_logits shape:", router_logits.shape)
+            # 假设形状为 (batch_size, seq_length, num_moe_layers, num_experts)
+            # 对 experts 做 argmax
+            selected_experts = router_logits.argmax(dim=-1)  # 维度: (batch_size, seq_length, num_moe_layers)
+            
+            print(f"\n请求 {req_idx + 1}: {req}")
+            print("每个 token 在每个 MoE 层选择的 Experts:")
+            
+            # 假设batch_size = 1（通常是生成场景下的标准使用方式）
+            _, seq_length, num_layers = selected_experts.shape
+            
+            for token_idx in range(seq_length):
+                token_id = inputs.input_ids[0, token_idx].item()
+                token_str = tokenizer.decode([token_id])
+                experts_per_layer = selected_experts[0, token_idx]  # (num_layers,)
+                layer_expert_map = ", ".join(
+                    [f"Layer {layer_idx}: Expert {expert.item()}"
+                     for layer_idx, expert in enumerate(experts_per_layer)]
+                )
+                print(f"Token: '{token_str}' -> {layer_expert_map}")
         
     except Exception as e:
         print(f"错误: {str(e)}")
