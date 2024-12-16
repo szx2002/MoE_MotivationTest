@@ -51,17 +51,30 @@ def main():
         # 出现的Expert统计
         activated_experts_per_layer = defaultdict(set)
         
-        def expert_hook(name):
+        def is_moe_layer(name, module):
+            # 修改匹配规则，确保识别 MoE 层
+            return "block_sparse_moe" in name and "experts" in name
+        
+        def expert_hook(layer_name):
             def hook(module, inp, out):
-                layer_idx = int(name.split(".")[2])
-                expert_idx = int(name.split(".")[-3])
-                activated_experts_per_layer[layer_idx].add(expert_idx)
+                print(f"MoE Layer activated: {layer_name}")
+                # 记录激活的 Expert 索引
+                for expert_name, expert_module in module.named_modules():
+                    if "experts" in expert_name:
+                        expert_idx = int(expert_name.split(".")[-3])
+                        activated_experts_per_layer[layer_name].add(expert_idx)
             return hook
         
-        # 为模型的MoE组件注册钩子
-        for name, module in model.named_modules():
-            if "block_sparse_moe.experts" in name and "w1.weight" in name:
-                module.register_forward_hook(expert_hook(name))
+        def register_hooks_for_submodules(parent_module, parent_name=""):
+            for name, sub_module in parent_module.named_children():
+                full_name = f"{parent_name}.{name}" if parent_name else name
+                if is_moe_layer(full_name, sub_module):
+                    print(f"Registering hook for MoE Layer: {full_name}")
+                    sub_module.register_forward_hook(expert_hook(full_name))
+                register_hooks_for_submodules(sub_module, full_name)
+        
+        # 注册 Hook
+        register_hooks_for_submodules(model)
 
         input_file = "requests.txt"
         requests = []
@@ -89,8 +102,8 @@ def main():
             
             print(f"\n请求 {req_idx + 1}: {req}")
             print("各层被激活的 Experts:\n")
-            for layer_idx, experts in sorted(activated_experts_per_layer.items()):
-                print(f"Layer {layer_idx}: Experts {sorted(experts)}")
+            for layer_name, experts in sorted(activated_experts_per_layer.items()):
+                print(f"{layer_name}: Experts {sorted(experts)}")
         
     except Exception as e:
         print(f"错误: {str(e)}")
