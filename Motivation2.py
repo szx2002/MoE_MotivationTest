@@ -57,7 +57,7 @@ def main():
                     requests.append(req)
         
         # 仅处理前两个请求
-        for req_idx, req in enumerate(requests[:2]):
+        for req_idx, req in enumerate(requests):
             inputs = tokenizer(req, return_tensors="pt").to("cuda")
             
             with torch.inference_mode():
