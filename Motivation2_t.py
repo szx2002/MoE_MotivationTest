@@ -80,7 +80,6 @@ def main():
                     **inputs,
                     max_new_tokens=1,
                     do_sample=False,
-                    return_dict=True,
                     output_router_logits=True  # 确保输出 router_logits
                 )
 
