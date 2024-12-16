@@ -66,14 +66,14 @@ def main():
                     return_dict=True
                 )
             
-            router_logits = outputs.router_logits  # 形状: (batch_size, sequence_length, num_experts)
+            router_logits = outputs.router_logits[0]  # 形状: (batch_size, sequence_length, num_experts)
             selected_experts = router_logits.argmax(dim=-1)  # 获取每个 token 选择的 Expert 索引
             
             print(f"\n请求 {req_idx + 1}: {req}")
             print("每个 token 选择的 Experts:")
             for idx, token_id in enumerate(inputs.input_ids[0]):
                 token = tokenizer.decode(token_id)
-                expert = selected_experts[0, idx].item()
+                expert = selected_experts[idx].item()
                 print(f"Token: '{token}' -> Expert: {expert}")
         
     except Exception as e:
