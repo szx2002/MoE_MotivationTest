@@ -66,16 +66,22 @@ def main():
                     return_dict=True
                 )
             
-            router_logits = outputs.router_logits[0]  # 形状: (batch_size, sequence_length, num_experts)
-            selected_experts = router_logits.argmax(dim=-1)  # 获取每个 token 选择的 Expert 索引
+            # router_logits 是一个列表，每个元素对应一层的 logits
+            router_logits_list = outputs.router_logits  # 形状: (num_layers, batch_size, sequence_length, num_experts)
             
             print(f"\n请求 {req_idx + 1}: {req}")
-            print("每个 token 选择的 Experts:")
-            for idx, token_id in enumerate(inputs.input_ids[0]):
-                token = tokenizer.decode(token_id)
-                expert = selected_experts[idx].item()
-                print(f"Token: '{token}' -> Expert: {expert}")
-        
+            print("每个 token 在每一层选择的 Experts:")
+
+            # 遍历每一层的 router_logits
+            for layer_idx, router_logits in enumerate(router_logits_list):
+                selected_experts = router_logits[0].argmax(dim=-1)  # 获取每个 token 选择的 Expert 索引
+
+                print(f"\nLayer {layer_idx + 1}:")
+                for idx, token_id in enumerate(inputs.input_ids[0]):
+                    token = tokenizer.decode(token_id)
+                    expert = selected_experts[idx].item()
+                    print(f"Token: '{token}' -> Expert: {expert}")
+
     except Exception as e:
         print(f"错误: {str(e)}")
         import traceback
