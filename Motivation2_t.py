@@ -79,7 +79,7 @@ def main():
                 print(f"\nLayer {layer_idx + 1}:")
                 for idx, token_id in enumerate(inputs.input_ids[0]):
                     token = tokenizer.decode(token_id)
-                    expert = selected_experts[idx].item()
+                    expert = selected_experts.item() if selected_experts.dim() == 0 else selected_experts[idx].item()
                     print(f"Token: '{token}' -> Expert: {expert}")
 
     except Exception as e:
