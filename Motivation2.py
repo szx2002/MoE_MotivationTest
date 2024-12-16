@@ -24,6 +24,7 @@ def main():
         # 加载分词器
         tokenizer = AutoTokenizer.from_pretrained(
             "/vllm-workspace/huggingfaceM87Bv01/Mixtral-8x7B-v0.1",
+            use_fast=True,  # 确保使用快速分词器
             token=token
         )
         
@@ -63,10 +64,11 @@ def main():
                 outputs = model(
                     **inputs,
                     output_router_logits=True,  # 启用路由器 logits 输出
-                    return_dict=True
+                    return_dict=True,
+                    use_cache=False  # 防止累积状态
                 )
             
-            # outputs.router_logits 可能是一个 tuple，每个元素对应一层的路由 logits 或专家选择
+            # outputs.router_logits 是一个包含每层 router_logits 的元组
             router_logits_tuple = outputs.router_logits
             print("router_logits 是一个 tuple，长度为:", len(router_logits_tuple))
             
@@ -79,30 +81,34 @@ def main():
             example_shape = router_logits_tuple[0].shape
             print(f"每个 router_logits 元素的形状: {example_shape}")
             
-            # 根据您的输出，router_logits_tuple 中每个元素的形状是 [batch_size, seq_length]
-            # 这表明每个元素已经是选中的专家索引
-            # 因此，无需进行 argmax 操作
-            # 我们可以将其堆叠成一个 [batch_size, seq_length, num_layers] 的张量
-            selected_experts = torch.stack(router_logits_tuple, dim=-1)  # [batch_size, seq_length, num_layers]
+            # 假设每个元素的形状为 [batch_size, num_experts]
+            # 您需要确认 num_experts 的数量
+            # 这里假设 num_experts=8
+            num_experts = example_shape[1]  # 从形状推断 num_experts
+            
+            # 对每层的 router_logits 进行 argmax 操作，获取选择的专家索引
+            selected_experts = [logits.argmax(dim=-1) for logits in router_logits_tuple]  # list of [batch_size]
+            
+            # stack 成 [batch_size, num_layers]
+            selected_experts = torch.stack(selected_experts, dim=-1)  # [batch_size, num_layers]
             print("selected_experts shape:", selected_experts.shape)
             
             print(f"\n请求 {req_idx + 1}: {req}")
             print("每个 token 在每个 MoE 层选择的 Experts:")
             
-            batch_size, seq_length, num_layers = selected_experts.shape
+            batch_size, num_layers = selected_experts.shape
             
-            # 假定 batch_size = 1
             for batch_idx in range(batch_size):
-                for token_idx in range(seq_length):
-                    token_id = inputs.input_ids[batch_idx, token_idx].item()
-                    token_str = tokenizer.decode([token_id])
-                    experts_per_layer = selected_experts[batch_idx, token_idx]  # [num_layers]
-                    layer_expert_map = ", ".join(
-                        [f"Layer {layer_idx}: Expert {expert.item()}"
-                         for layer_idx, expert in enumerate(experts_per_layer)]
-                    )
-                    print(f"Token: '{token_str}' -> {layer_expert_map}")
-        
+                # 假设每个请求只有一个 token，如果有多个 token，请根据需要调整
+                token_id = inputs.input_ids[batch_idx, 0].item()
+                token_str = tokenizer.decode([token_id])
+                experts_per_layer = selected_experts[batch_idx]  # [num_layers]
+                layer_expert_map = ", ".join(
+                    [f"Layer {layer_idx}: Expert {expert.item()}"
+                     for layer_idx, expert in enumerate(experts_per_layer)]
+                )
+                print(f"Token: '{token_str}' -> {layer_expert_map}")
+    
     except Exception as e:
         print(f"错误: {str(e)}")
         import traceback
