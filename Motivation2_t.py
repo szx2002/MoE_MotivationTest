@@ -3,7 +3,6 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 from huggingface_hub import login
 import warnings
-from collections import defaultdict
 
 warnings.filterwarnings('ignore')
 
@@ -48,21 +47,6 @@ def main():
         
         print("模型加载完成！")
         
-        # 记录所有被激活的模块
-        activated_modules = []
-        
-        def hook(module, inp, out):
-            activated_modules.append(module)
-            print(f"Activated module: {module}")
-        
-        def register_hooks_for_submodules(parent_module):
-            for sub_module in parent_module.children():
-                sub_module.register_forward_hook(hook)
-                register_hooks_for_submodules(sub_module)
-        
-        # 注册 Hook
-        register_hooks_for_submodules(model)
-
         input_file = "requests.txt"
         requests = []
         with open(input_file, 'r', encoding='utf-8') as f:
@@ -73,24 +57,24 @@ def main():
         
         # 仅处理前两个请求
         for req_idx, req in enumerate(requests[:2]):
-            activated_modules.clear()
             inputs = tokenizer(req, return_tensors="pt").to("cuda")
             
             with torch.inference_mode():
-                model.generate(
+                outputs = model(
                     **inputs,
-                    max_new_tokens=1,
-                    num_return_sequences=1,
-                    do_sample=False,
-                    temperature=0.7,
-                    top_p=0.95,
-                    repetition_penalty=1.1,
-                    use_cache=False
+                    output_router_logits=True,  # 启用路由器 logits 输出
+                    return_dict=True
                 )
             
-            print(f"\n请求 {req_idx + 1} 激活的模块:")
-            for module in activated_modules:
-                print(module)
+            router_logits = outputs.router_logits  # 形状: (batch_size, sequence_length, num_experts)
+            selected_experts = router_logits.argmax(dim=-1)  # 获取每个 token 选择的 Expert 索引
+            
+            print(f"\n请求 {req_idx + 1}: {req}")
+            print("每个 token 选择的 Experts:")
+            for idx, token_id in enumerate(inputs.input_ids[0]):
+                token = tokenizer.decode(token_id)
+                expert = selected_experts[0, idx].item()
+                print(f"Token: '{token}' -> Expert: {expert}")
         
     except Exception as e:
         print(f"错误: {str(e)}")
