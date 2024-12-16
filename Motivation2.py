@@ -81,40 +81,34 @@ def main():
             example_shape = router_logits_tuple[0].shape
             print(f"每个 router_logits 元素的形状: {example_shape}")
             
-            # 假设每个元素的形状为 [batch_size, num_experts]
+            # 假设每个元素的形状为 [sequence_length, num_experts]
             # 这里需要确认 num_experts 的数量
-            # 这里假设 num_experts=8
-            # 如果实际 num_experts 不同，请根据实际情况调整
             num_experts = example_shape[1]  # 从形状推断 num_experts
             
             # 对每层的 router_logits 进行 argmax 操作，获取选择的专家索引
-            # 这里每个 layer 的 router_logits 是 [batch_size, num_experts]
-            # 进行 argmax 后，每个 layer 的选择是 [batch_size]
-            selected_experts = [logits.argmax(dim=-1) for logits in router_logits_tuple]  # list of [batch_size]
+            # 这里每个 layer 的 router_logits 是 [sequence_length, num_experts]
+            # 进行 argmax 后，每个 layer 的选择是 [sequence_length]
+            selected_experts = [logits.argmax(dim=-1) for logits in router_logits_tuple]  # list of [sequence_length]
             
-            # stack 成 [batch_size, num_layers]
-            selected_experts = torch.stack(selected_experts, dim=-1)  # [batch_size, num_layers]
+            # stack 成 [sequence_length, num_layers]
+            selected_experts = torch.stack(selected_experts, dim=-1)  # [sequence_length, num_layers]
             print("selected_experts shape:", selected_experts.shape)
             
             print(f"\n请求 {req_idx + 1}: {req}")
             print("每个 token 在每个 MoE 层选择的 Experts:")
             
-            batch_size, num_layers = selected_experts.shape
+            sequence_length, num_layers = selected_experts.shape
             
-            # 遍历每个样本（通常 batch_size=1）
-            for batch_idx in range(batch_size):
-                # 获取序列长度
-                seq_length = inputs.input_ids.size(1)
-                for token_idx in range(seq_length):
-                    token_id = inputs.input_ids[batch_idx, token_idx].item()
-                    token_str = tokenizer.decode([token_id])
-                    # 获取该 token 在所有层的专家选择
-                    experts_per_layer = selected_experts[batch_idx, :]  # [num_layers]
-                    layer_expert_map = ", ".join(
-                        [f"Layer {layer_idx}: Expert {expert.item()}"
-                         for layer_idx, expert in enumerate(experts_per_layer)]
-                    )
-                    print(f"Token: '{token_str}' -> {layer_expert_map}")
+            for token_idx in range(sequence_length):
+                token_id = inputs.input_ids[0, token_idx].item()
+                token_str = tokenizer.decode([token_id])
+                # 获取该 token 在所有层的专家选择
+                experts_per_layer = selected_experts[token_idx, :]  # [num_layers]
+                layer_expert_map = ", ".join(
+                    [f"Layer {layer_idx}: Expert {expert.item()}"
+                     for layer_idx, expert in enumerate(experts_per_layer)]
+                )
+                print(f"Token: '{token_str}' -> {layer_expert_map}")
     
     except Exception as e:
         print(f"错误: {str(e)}")
