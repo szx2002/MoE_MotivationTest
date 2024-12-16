@@ -101,20 +101,21 @@ def main():
             
             # 初始化一个集合来存储整个请求中激活的专家
             total_activated_experts = set()
-            
+            num_total = 0
+
             for layer_idx in range(num_layers):
                 # 获取该层所有 token 选择的专家
                 experts_in_layer = selected_experts[:, layer_idx].tolist()
                 # 使用 set 去重
                 unique_experts_in_layer = set(experts_in_layer)
                 num_unique_experts = len(unique_experts_in_layer)
+                num_total += num_unique_experts
                 print(f"  Layer {layer_idx}: 激活的专家数量 = {num_unique_experts}")
                 
                 # 将该层的专家加入到总集合中
                 total_activated_experts.update(unique_experts_in_layer)
             
-            total_unique_experts = len(total_activated_experts)
-            print(f"  该请求中激活的专家总数 = {total_unique_experts}\n")
+            print(f"  该请求中激活的专家总数 = {num_total}\n")
     
     except Exception as e:
         print(f"错误: {str(e)}")
