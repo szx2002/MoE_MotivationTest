@@ -57,10 +57,18 @@ def main():
         
         def expert_hook(layer_name):
             def hook(module, inp, out):
-                for expert_name, expert_module in module.named_modules():
-                    if "experts" in expert_name:
-                        expert_idx = int(expert_name.split(".")[-3])
-                        activated_experts_per_layer[layer_name].add(expert_idx)
+                # 解析层号和专家号
+                parts = layer_name.split(".")
+                layer_idx = None
+                expert_idx = None
+                for i, part in enumerate(parts):
+                    if part == "layers":
+                        layer_idx = int(parts[i + 1])
+                    if part == "experts":
+                        expert_idx = int(parts[i + 1])
+                
+                if layer_idx is not None and expert_idx is not None:
+                    activated_experts_per_layer[layer_idx].add(expert_idx)
             return hook
         
         def register_hooks_for_submodules(parent_module, parent_name=""):
@@ -99,9 +107,10 @@ def main():
             
             total_activated_experts = sum(len(experts) for experts in activated_experts_per_layer.values())
             print(f"\n请求 {req_idx + 1}:")
-            for layer_name, experts in sorted(activated_experts_per_layer.items()):
-                print(f"  {layer_name}: {len(experts)} 个 Experts 激活")
-            print(f"  激活的 Experts 总数: {total_activated_experts}")
+            print("各层被激活的 Experts 数量:\n")
+            for layer_idx, experts in sorted(activated_experts_per_layer.items()):
+                print(f"Layer {layer_idx}: {len(experts)} 个 Experts 激活")
+            print(f"激活的 Experts 总数: {total_activated_experts}")
         
     except Exception as e:
         print(f"错误: {str(e)}")
