@@ -66,23 +66,33 @@ def main():
                     return_dict=True
                 )
             
-            router_logits = outputs.router_logits
-            # 确认 router_logits 的形状
+            # outputs.router_logits 可能是一个 tuple，每个元素对应一层的路由 logits
+            router_logits_tuple = outputs.router_logits
+            print("router_logits 是一个 tuple，长度为:", len(router_logits_tuple))
+            
+            # 确保 tuple 非空
+            if len(router_logits_tuple) == 0:
+                print("没有路由器 logits 输出，检查模型配置和输出选项。")
+                continue
+            
+            # 每个元素应该是形如 (batch_size, seq_length, num_experts) 的张量
+            # stack 之后变为 (batch_size, seq_length, num_layers, num_experts)
+            router_logits = torch.stack(router_logits_tuple, dim=2) 
             print("router_logits shape:", router_logits.shape)
-            # 假设形状为 (batch_size, seq_length, num_moe_layers, num_experts)
+            
             # 对 experts 做 argmax
-            selected_experts = router_logits.argmax(dim=-1)  # 维度: (batch_size, seq_length, num_moe_layers)
+            selected_experts = router_logits.argmax(dim=-1)  # (batch_size, seq_length, num_layers)
             
             print(f"\n请求 {req_idx + 1}: {req}")
             print("每个 token 在每个 MoE 层选择的 Experts:")
             
-            # 假设batch_size = 1（通常是生成场景下的标准使用方式）
-            _, seq_length, num_layers = selected_experts.shape
+            batch_size, seq_length, num_layers = selected_experts.shape
             
+            # 假定 batch_size = 1
             for token_idx in range(seq_length):
                 token_id = inputs.input_ids[0, token_idx].item()
                 token_str = tokenizer.decode([token_id])
-                experts_per_layer = selected_experts[0, token_idx]  # (num_layers,)
+                experts_per_layer = selected_experts[0, token_idx]
                 layer_expert_map = ", ".join(
                     [f"Layer {layer_idx}: Expert {expert.item()}"
                      for layer_idx, expert in enumerate(experts_per_layer)]
