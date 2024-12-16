@@ -42,8 +42,8 @@ if __name__ == "__main__":
     # 检查文件和分词器是否存在
     if not os.path.exists(requests_file):
         print(f"Error: File '{requests_file}' not found.")
-    elif not os.path.exists(tokenizer_path):
-        print(f"Error: Tokenizer folder '{tokenizer_path}' not found.")
+    #elif not os.path.exists(tokenizer_path):
+        #print(f"Error: Tokenizer folder '{tokenizer_path}' not found.")
     else:
         requests = read_requests(requests_file)
         process_requests(requests, tokenizer)
