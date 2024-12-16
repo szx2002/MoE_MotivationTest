@@ -95,20 +95,26 @@ def main():
             print("selected_experts shape:", selected_experts.shape)
             
             print(f"\n请求 {req_idx + 1}: {req}")
-            print("每个 token 在每个 MoE 层选择的 Experts:")
+            print("每一层中激活的专家数量以及请求中激活的专家总数:")
             
             sequence_length, num_layers = selected_experts.shape
             
-            for token_idx in range(sequence_length):
-                token_id = inputs.input_ids[0, token_idx].item()
-                token_str = tokenizer.decode([token_id])
-                # 获取该 token 在所有层的专家选择
-                experts_per_layer = selected_experts[token_idx, :]  # [num_layers]
-                layer_expert_map = ", ".join(
-                    [f"Layer {layer_idx}: Expert {expert.item()}"
-                     for layer_idx, expert in enumerate(experts_per_layer)]
-                )
-                print(f"Token: '{token_str}' -> {layer_expert_map}")
+            # 初始化一个集合来存储整个请求中激活的专家
+            total_activated_experts = set()
+            
+            for layer_idx in range(num_layers):
+                # 获取该层所有 token 选择的专家
+                experts_in_layer = selected_experts[:, layer_idx].tolist()
+                # 使用 set 去重
+                unique_experts_in_layer = set(experts_in_layer)
+                num_unique_experts = len(unique_experts_in_layer)
+                print(f"  Layer {layer_idx}: 激活的专家数量 = {num_unique_experts}")
+                
+                # 将该层的专家加入到总集合中
+                total_activated_experts.update(unique_experts_in_layer)
+            
+            total_unique_experts = len(total_activated_experts)
+            print(f"  该请求中激活的专家总数 = {total_unique_experts}\n")
     
     except Exception as e:
         print(f"错误: {str(e)}")
