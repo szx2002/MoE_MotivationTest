@@ -28,7 +28,7 @@ def main():
     # 加载模型配置（不自动加载权重）
     config = AutoConfig.from_pretrained("mistralai/Mixtral-8x7B-v0.1", token=token)
     # 基于config初始化空模型
-    model = AutoModelForCausalLM.from_config(config, quantization_config=quantization_config)
+    model = AutoModelForCausalLM.from_config(config)
     model.to("cpu")
     
     # 加载分词器
