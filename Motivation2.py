@@ -48,7 +48,7 @@ def main():
         
         print("模型加载完成！")
         
-        input_file = "requests.txt"
+        input_file = "requestM2.txt"
         requests = []
         with open(input_file, 'r', encoding='utf-8') as f:
             for line in f:

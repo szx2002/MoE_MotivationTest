@@ -10,7 +10,7 @@ login(token)
 
 # 分词器和模型路径
 tokenizer_path = "/vllm-workspace/huggingfaceM87Bv01/Mixtral-8x7B-v0.1"
-requests_file = "requests.txt"
+requests_file = "requestM2.txt"
 
 # 加载分词器和模型
 tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, token=token)
