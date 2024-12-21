@@ -287,7 +287,11 @@ def main():
             plt.show()
     
         print(f"所有请求合计：swap in次数={total_swap_in_count}, swap out次数={total_swap_out_count}, swap操作总延时={total_swap_latency:.4f}s")
-
+        
+    except Exception as e:
+        print(f"错误: {str(e)}")
+        traceback.print_exc()
+        return  # 终止程序，避免后续代码出错
 
 if __name__ == "__main__":
     torch.cuda.empty_cache()
