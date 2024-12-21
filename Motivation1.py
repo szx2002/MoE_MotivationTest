@@ -32,7 +32,7 @@ def main():
         max_memory = {0: "20GB"}
         device_map = {
             "model.embed_tokens": 0,
-            "model.layers": 0,
+            "model.layers.0": 0,
             "model.norm": 0,
             "lm_head": 0
         }
