@@ -7,7 +7,7 @@ from huggingface_hub import login
 from accelerate import load_checkpoint_and_dispatch
 import matplotlib.pyplot as plt
 import random
-import traceback
+import traceback  # 确保在顶部导入
 
 def main():
     token = "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"
@@ -27,7 +27,7 @@ def main():
         # 加载分词器
         tokenizer = AutoTokenizer.from_pretrained(
             "/vllm-workspace/huggingfaceM87Bv01/Mixtral-8x7B-v0.1",
-            use_auth_token=token  # 使用 'use_auth_token' 而不是 'token'
+            token=token  # 使用 'token' 而不是 'use_auth_token'
         )
         
         # 设置设备映射
@@ -61,9 +61,10 @@ def main():
             quantization_config=quantization_config,
             device_map=device_map,
             max_memory=max_memory,
-            use_auth_token=token,  # 使用 'use_auth_token' 而不是 'token'
+            token=token,  # 使用 'token' 而不是 'use_auth_token'
             torch_dtype=torch.float16,
-            llm_int8_enable_fp32_cpu_offload=True,  # 启用 FP32 CPU offload
+            offload_state_dict=True,  # 启用 FP32 CPU offload
+            offload_folder="./offload",  # 设置 offload_folder，确保该目录存在
             trust_remote_code=True,  # 如果模型使用自定义代码，需设置为 True
             use_safetensors=True      # 使用 safetensors 格式
         )
@@ -286,11 +287,7 @@ def main():
             plt.show()
     
         print(f"所有请求合计：swap in次数={total_swap_in_count}, swap out次数={total_swap_out_count}, swap操作总延时={total_swap_latency:.4f}s")
-        
-    except Exception as e:
-        print(f"错误: {str(e)}")
-        import traceback
-        traceback.print_exc()
+
 
 if __name__ == "__main__":
     torch.cuda.empty_cache()
