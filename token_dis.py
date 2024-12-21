@@ -22,10 +22,10 @@ def read_requests(file_path):
     with open(file_path, 'r', encoding='utf-8') as f:
         return [line.strip() for line in f if line.strip()]
 
-# 计算相邻 token 向量之间的欧几里得距离和余弦相似度
-def calculate_distances_and_similarity(embeddings):
+# 计算相邻 token 向量之间的欧几里得距离、余弦相似度及欧几里得距离总和
+def calculate_metrics(embeddings):
     if len(embeddings) < 2:
-        return 0, 0  # 如果 token 少于 2 个，返回 0
+        return 0, 0, 0  # 如果 token 少于 2 个，返回 0
     
     euclidean_distances = [torch.dist(embeddings[i], embeddings[i + 1]).item() for i in range(len(embeddings) - 1)]
     cosine_similarities = [
@@ -35,8 +35,9 @@ def calculate_distances_and_similarity(embeddings):
     
     avg_euclidean_distance = np.mean(euclidean_distances)
     avg_cosine_similarity = np.mean(cosine_similarities)
+    sum_euclidean_distance = np.sum(euclidean_distances)
     
-    return avg_euclidean_distance, avg_cosine_similarity
+    return avg_euclidean_distance, avg_cosine_similarity, sum_euclidean_distance
 
 # 处理每个请求并输出结果到 token_dis.txt
 def process_requests(requests, tokenizer, model, output_path):
@@ -49,14 +50,14 @@ def process_requests(requests, tokenizer, model, output_path):
             token_embeddings = outputs.last_hidden_state.squeeze(0)
             
             token_count = token_embeddings.shape[0]
-            avg_euclidean_distance, avg_cosine_similarity = calculate_distances_and_similarity(token_embeddings)
+            avg_euclidean_distance, avg_cosine_similarity, sum_euclidean_distance = calculate_metrics(token_embeddings)
             
-            # 写入文件，每行包含两个数值，以空格分隔
-            f_out.write(f"{avg_euclidean_distance} {avg_cosine_similarity}\n")
+            # 写入文件，每行包含三个数值，以空格分隔
+            f_out.write(f"{avg_euclidean_distance} {avg_cosine_similarity} {sum_euclidean_distance}\n")
             
             # 可选：打印进度
-            print(f"Processed Request {i + 1}: Avg Euclidean Distance = {avg_euclidean_distance:.4f}, Avg Cosine Similarity = {avg_cosine_similarity:.4f}")
-
+            print(f"Processed Request {i + 1}: Avg Euclidean Distance = {avg_euclidean_distance:.4f}, Avg Cosine Similarity = {avg_cosine_similarity:.4f}, Sum Euclidean Distance = {sum_euclidean_distance:.4f}")
+    
 if __name__ == "__main__":
     # 检查文件和分词器是否存在
     if not os.path.exists(requests_file):
