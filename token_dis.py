@@ -11,10 +11,11 @@ login(token)
 # 分词器和模型路径
 tokenizer_path = "/vllm-workspace/huggingfaceM87Bv01/Mixtral-8x7B-v0.1"
 requests_file = "requestM3.txt"
+output_file = "token_dis.txt"  # 输出文件名
 
 # 加载分词器和模型
-tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, token=token)
-model = AutoModel.from_pretrained(tokenizer_path, token=token)
+tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, use_auth_token=token)
+model = AutoModel.from_pretrained(tokenizer_path, use_auth_token=token)
 
 # 读取 requests.txt 文件
 def read_requests(file_path):
@@ -37,22 +38,24 @@ def calculate_distances_and_similarity(embeddings):
     
     return avg_euclidean_distance, avg_cosine_similarity
 
-# 处理每个请求并输出结果
-def process_requests(requests, tokenizer, model):
-    for i, request in enumerate(requests):
-        # 对请求进行分词并获取 token 向量
-        inputs = tokenizer(request, return_tensors="pt")
-        with torch.no_grad():
-            outputs = model(**inputs)
-        token_embeddings = outputs.last_hidden_state.squeeze(0)
-        
-        token_count = token_embeddings.shape[0]
-        avg_euclidean_distance, avg_cosine_similarity = calculate_distances_and_similarity(token_embeddings)
-        
-        print(f"Request {i + 1}:")
-        print(f"  Token Count: {token_count}")
-        print(f"  Average Euclidean Distance: {avg_euclidean_distance:.4f}")
-        print(f"  Average Cosine Similarity: {avg_cosine_similarity:.4f}\n")
+# 处理每个请求并输出结果到 token_dis.txt
+def process_requests(requests, tokenizer, model, output_path):
+    with open(output_path, 'w', encoding='utf-8') as f_out:
+        for i, request in enumerate(requests):
+            # 对请求进行分词并获取 token 向量
+            inputs = tokenizer(request, return_tensors="pt")
+            with torch.no_grad():
+                outputs = model(**inputs)
+            token_embeddings = outputs.last_hidden_state.squeeze(0)
+            
+            token_count = token_embeddings.shape[0]
+            avg_euclidean_distance, avg_cosine_similarity = calculate_distances_and_similarity(token_embeddings)
+            
+            # 写入文件，每行包含两个数值，以空格分隔
+            f_out.write(f"{avg_euclidean_distance} {avg_cosine_similarity}\n")
+            
+            # 可选：打印进度
+            print(f"Processed Request {i + 1}: Avg Euclidean Distance = {avg_euclidean_distance:.4f}, Avg Cosine Similarity = {avg_cosine_similarity:.4f}")
 
 if __name__ == "__main__":
     # 检查文件和分词器是否存在
@@ -62,4 +65,5 @@ if __name__ == "__main__":
         print(f"Error: Tokenizer folder '{tokenizer_path}' not found.")
     else:
         requests = read_requests(requests_file)
-        process_requests(requests, tokenizer, model)
+        process_requests(requests, tokenizer, model, output_file)
+        print(f"Results have been written to '{output_file}'.")
