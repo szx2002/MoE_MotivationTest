@@ -120,101 +120,112 @@ def main():
         normal_times = []
         total_times = []
 
-        # 开始处理每个请求
-        for req_idx, req in enumerate(requests):
-            input_ids = tokenizer(req, return_tensors="pt").input_ids
-            req_length = input_ids.shape[1]  # token数
-            request_lengths.append(req_length)
+        # 打开输出文件，准备写入 moe_latency 和 total_latency
+        output_file = "results_M3.txt"
+        with open(output_file, 'w', encoding='utf-8') as f_out:
+            # 开始处理每个请求
+            for req_idx, req in enumerate(requests):
+                input_ids = tokenizer(req, return_tensors="pt").input_ids
+                req_length = input_ids.shape[1]  # token数
+                request_lengths.append(req_length)
 
-            # 重置计时器
-            total_transformer_runtime = 0.0
-            normal_transformer_runtime = 0.0
-            moe_transformer_runtime = 0.0
-            first_moe_layer_name = None
-            first_normal_layer_name = None
-            layer_start_events.clear()
-            
-            inputs = tokenizer(req, return_tensors="pt").to("cuda")
+                # 重置计时器
+                total_transformer_runtime = 0.0
+                normal_transformer_runtime = 0.0
+                moe_transformer_runtime = 0.0
+                first_moe_layer_name = None
+                first_normal_layer_name = None
+                layer_start_events.clear()
+                
+                inputs = tokenizer(req, return_tensors="pt").to("cuda")
 
-            # 使用CUDA事件计时整体预测时间
-            total_start = torch.cuda.Event(enable_timing=True)
-            total_end = torch.cuda.Event(enable_timing=True)
+                # 使用CUDA事件计时整体预测时间
+                total_start = torch.cuda.Event(enable_timing=True)
+                total_end = torch.cuda.Event(enable_timing=True)
 
-            total_start.record()
-            with torch.inference_mode():
-                outputs = model.generate(
-                    **inputs,
-                    max_new_tokens=1,
-                    num_return_sequences=1,
-                    do_sample=False,
-                    temperature=0.7,
-                    top_p=0.95,
-                    repetition_penalty=1.1,
-                    use_cache=False
-                )
-                print(outputs)
-            total_end.record()
-            total_end.synchronize()
+                total_start.record()
+                with torch.inference_mode():
+                    outputs = model.generate(
+                        **inputs,
+                        max_new_tokens=1,
+                        num_return_sequences=1,
+                        do_sample=False,
+                        temperature=0.7,
+                        top_p=0.95,
+                        repetition_penalty=1.1,
+                        use_cache=False
+                    )
+                    print(outputs)
+                total_end.record()
+                total_end.synchronize()
 
-            total_runtime_ms = total_start.elapsed_time(total_end)
-            total_runtime = total_runtime_ms / 1000.0
+                total_runtime_ms = total_start.elapsed_time(total_end)
+                total_runtime = total_runtime_ms / 1000.0
 
-            #moe_times.append(moe_transformer_runtime)
-            moe_transformer_runtime = outputs['latency']
-            normal_times.append(normal_transformer_runtime)
-            total_times.append(total_runtime)
+                # 确保 outputs 包含 'latency' 键
+                if 'latency' in outputs:
+                    moe_transformer_runtime = outputs['latency']
+                else:
+                    # 如果没有 'latency'，使用通过hook记录的moe_transformer_runtime
+                    pass  # 保持现有值
+                
+                normal_times.append(normal_transformer_runtime)
+                total_times.append(total_runtime)
+                moe_times.append(moe_transformer_runtime)
 
-            print(f"请求长度 {req_length} 完成：")
-            print(f"  第一个MoE层: {first_moe_layer_name if first_moe_layer_name else '无MoE层'}")
-            print(f"  第一个普通层: {first_normal_layer_name if first_normal_layer_name else '无普通层'}")
-            print(f"  MoE层运行时间   {moe_transformer_runtime:.4f}s")
-            print(f"  普通层运行时间 {normal_transformer_runtime:.4f}s")
-            print(f"  整个预测过程运行时间 {total_runtime:.4f}s")
+                # 将 moe_latency 和 total_latency 写入文件
+                f_out.write(f"{moe_transformer_runtime} {total_runtime}\n")
 
-            # ========== 以下为第二份代码中关于 router_logits 的提取与分析部分 ==========
+                print(f"请求长度 {req_length} 完成：")
+                print(f"  第一个MoE层: {first_moe_layer_name if first_moe_layer_name else '无MoE层'}")
+                print(f"  第一个普通层: {first_normal_layer_name if first_normal_layer_name else '无普通层'}")
+                print(f"  MoE层运行时间   {moe_transformer_runtime:.4f}s")
+                print(f"  普通层运行时间 {normal_transformer_runtime:.4f}s")
+                print(f"  整个预测过程运行时间 {total_runtime:.4f}s")
 
-            # 在完成时延统计后，对同一输入再进行一次forward以获取router_logits
-            with torch.inference_mode():
-                router_outputs = model(
-                    **inputs,
-                    output_router_logits=True,  # 启用路由器 logits 输出
-                    return_dict=True,
-                    use_cache=False  # 防止累积状态
-                )
-            
-            router_logits_tuple = router_outputs.router_logits
-            print("router_logits 是一个 tuple，长度为:", len(router_logits_tuple))
-            
-            if len(router_logits_tuple) == 0:
-                print("没有路由器 logits 输出，检查模型配置和输出选项。")
-                continue
-            
-            example_shape = router_logits_tuple[0].shape
-            print(f"每个 router_logits 元素的形状: {example_shape}")
-            
-            # 对每层进行 argmax，获取激活的专家
-            selected_experts = [logits.argmax(dim=-1) for logits in router_logits_tuple]  
-            selected_experts = torch.stack(selected_experts, dim=-1)  # [sequence_length, num_layers]
-            print("selected_experts shape:", selected_experts.shape)
-            
-            print(f"\n请求 {req_idx + 1}: {req}")
-            print("每一层中激活的专家数量以及请求中激活的专家总数:")
+                # ========== 以下为第二份代码中关于 router_logits 的提取与分析部分 ==========
+                # 在完成时延统计后，对同一输入再进行一次forward以获取router_logits
+                with torch.inference_mode():
+                    router_outputs = model(
+                        **inputs,
+                        output_router_logits=True,  # 启用路由器 logits 输出
+                        return_dict=True,
+                        use_cache=False  # 防止累积状态
+                    )
+                
+                router_logits_tuple = router_outputs.router_logits
+                print("router_logits 是一个 tuple，长度为:", len(router_logits_tuple))
+                
+                if len(router_logits_tuple) == 0:
+                    print("没有路由器 logits 输出，检查模型配置和输出选项。")
+                    continue
+                
+                example_shape = router_logits_tuple[0].shape
+                print(f"每个 router_logits 元素的形状: {example_shape}")
+                
+                # 对每层进行 argmax，获取激活的专家
+                selected_experts = [logits.argmax(dim=-1) for logits in router_logits_tuple]  
+                selected_experts = torch.stack(selected_experts, dim=-1)  # [sequence_length, num_layers]
+                print("selected_experts shape:", selected_experts.shape)
+                
+                print(f"\n请求 {req_idx + 1}: {req}")
+                print("每一层中激活的专家数量以及请求中激活的专家总数:")
 
-            sequence_length, num_layers = selected_experts.shape
-            
-            total_activated_experts = set()
-            num_total_experts = 0
+                sequence_length, num_layers = selected_experts.shape
+                
+                total_activated_experts = set()
+                num_total_experts = 0
 
-            for layer_idx in range(num_layers):
-                experts_in_layer = selected_experts[:, layer_idx].tolist()
-                unique_experts_in_layer = set(experts_in_layer)
-                num_unique_experts = len(unique_experts_in_layer)
-                num_total_experts += num_unique_experts
-                print(f"  Layer {layer_idx}: 激活的专家数量 = {num_unique_experts}")
-                total_activated_experts.update(unique_experts_in_layer)
-            
-            print(f"  该请求中激活的专家总数 = {num_total_experts}\n")
-            # ========== 第二份代码的逻辑到此结束 ==========
+                for layer_idx in range(num_layers):
+                    experts_in_layer = selected_experts[:, layer_idx].tolist()
+                    unique_experts_in_layer = set(experts_in_layer)
+                    num_unique_experts = len(unique_experts_in_layer)
+                    num_total_experts += num_unique_experts
+                    print(f"  Layer {layer_idx}: 激活的专家数量 = {num_unique_experts}")
+                    total_activated_experts.update(unique_experts_in_layer)
+                
+                print(f"  该请求中激活的专家总数 = {num_total_experts}\n")
+                # ========== 第二份代码的逻辑到此结束 ==========
 
         # 绘图部分（来自第一份代码）
         plt.figure(figsize=(10, 6))
