@@ -107,7 +107,7 @@ def main():
             layer_name = f"layer_{i}"
             register_hooks_for_submodules(layer_module, layer_name)
 
-        input_file = "requests.txt"
+        input_file = "requestM3.txt"
         requests = []
         with open(input_file, 'r', encoding='utf-8') as f:
             for line in f:
