@@ -11,107 +11,47 @@ import matplotlib.pyplot as plt
 import random
 import traceback  # 确保在顶部导入
 
-def move_expert_to_device(model, layer_idx, expert_idx, device, device_map):
+def move_expert_to_device(model, layer_idx, expert_idx, device):
     """
     将指定层和专家的所有参数及缓冲区移动到目标设备（CPU 或 GPU）。
-    并更新设备映射。
     """
     prefix = f"model.layers.{layer_idx}.block_sparse_moe.experts.{expert_idx}"
     try:
         expert = model.get_submodule(prefix)
         expert.to(device)
-        device_map[(layer_idx, expert_idx)] = device
         print(f"已将 {prefix} 移动到 {device}")
         return True
     except AttributeError as e:
         print(f"模型中未找到 {prefix}: {e}")
         return False
 
-def swap_in_expert(model, layer_idx, expert_idx, device_map, experts_in_gpu):
+def swap_in_expert(model, layer_idx, expert_idx, experts_in_gpu):
     """
-    将指定专家移动到 GPU，并更新设备映射和 experts_in_gpu 集合。
+    将指定专家移动到 GPU。
     """
-    moved = move_expert_to_device(model, layer_idx, expert_idx, "cuda", device_map)
+    start_t = time.perf_counter()
+    moved = move_expert_to_device(model, layer_idx, expert_idx, "cuda")
+    end_t = time.perf_counter()
     if moved:
         experts_in_gpu.add((layer_idx, expert_idx))
-        print(f"专家 ({layer_idx}, {expert_idx}) 已被移动到 GPU")
-    return moved
+        swap_latency = end_t - start_t
+        return 1, 0, swap_latency
+    else:
+        return 0, 0, 0.0
 
-def swap_out_expert(model, layer_idx, expert_idx, device_map, experts_in_gpu):
+def swap_out_expert(model, layer_idx, expert_idx, experts_in_gpu):
     """
-    将指定专家移动到 CPU，并更新设备映射和 experts_in_gpu 集合。
+    将指定专家移动到 CPU。
     """
-    moved = move_expert_to_device(model, layer_idx, expert_idx, "cpu", device_map)
+    start_t = time.perf_counter()
+    moved = move_expert_to_device(model, layer_idx, expert_idx, "cpu")
+    end_t = time.perf_counter()
     if moved:
         experts_in_gpu.discard((layer_idx, expert_idx))
-        print(f"专家 ({layer_idx}, {expert_idx}) 已被移动到 CPU")
-    return moved
-
-def get_router_logits(model, inputs):
-    """
-    运行前向传播以获取 router_logits。
-    """
-    with torch.inference_mode():
-        outputs = model(
-            **inputs,
-            output_router_logits=True,
-            return_dict=True,
-            use_cache=False
-        )
-    return outputs.router_logits
-
-def get_used_experts(router_logits):
-    """
-    基于 router_logits 确定需要使用的专家。
-    """
-    # 假设 router_logits 是一个 tuple，每个元素的形状为 [batch_size, num_experts]
-    used_experts = set()
-    for layer_idx, logits in enumerate(router_logits):
-        # 对于每一层，选择 logit 最高的专家
-        selected_expert = logits.argmax(dim=-1).item()  # 假设 batch_size=1
-        used_experts.add((layer_idx, selected_expert))
-    return used_experts
-
-def ensure_experts_on_gpu(model, used_experts, device_map, experts_in_gpu, max_experts_in_gpu):
-    """
-    确保所有使用的专家都在 GPU 上。如果不在，进行 swap in。
-    如果 GPU 已满，则进行 swap out。
-    """
-    for (layer_idx, expert_idx) in used_experts:
-        if device_map.get((layer_idx, expert_idx), 'cuda') != 'cuda':
-            if len(experts_in_gpu) >= max_experts_in_gpu:
-                # 选择一个当前在 GPU 上的专家进行 swap out
-                expert_to_remove = random.choice(list(experts_in_gpu))
-                print(f"  GPU已满，正在将专家 {expert_to_remove} 移动回 CPU")
-                swap_out_expert(model, expert_to_remove[0], expert_to_remove[1], device_map, experts_in_gpu)
-            # Swap in the required expert
-            print(f"  将专家 ({layer_idx}, {expert_idx}) 移动到 GPU")
-            swap_in_expert(model, layer_idx, expert_idx, device_map, experts_in_gpu)
-
-def verify_device_consistency(model, device_map, num_layers, num_experts):
-    """
-    验证模型中：
-    - 所有非专家参数均位于 GPU 上。
-    - 每个专家位于其设备映射中指定的设备上。
-    """
-    inconsistencies = False
-    for name, param in model.named_parameters():
-        parts = name.split('.')
-        if "block_sparse_moe.experts" in name:
-            layer_idx = int(parts[2])
-            expert_idx = int(parts[5])
-            expected_device = device_map.get((layer_idx, expert_idx), 'cuda')
-            if param.device.type != expected_device:
-                print(f"设备不匹配：{name} 应位于 {expected_device}, 但当前位于 {param.device}")
-                inconsistencies = True
-        else:
-            if param.device.type != 'cuda':
-                print(f"非专家参数 {name} 当前位于 {param.device}, 预期位于 cuda")
-                inconsistencies = True
-    if not inconsistencies:
-        print("设备一致性验证通过：所有参数均位于正确的设备上。")
+        swap_latency = end_t - start_t
+        return 0, 1, swap_latency
     else:
-        print("设备一致性验证失败：部分参数不在预期的设备上。")
+        return 0, 0, 0.0
 
 def main():
     try:
@@ -206,22 +146,29 @@ def main():
 
         # 获取 num_experts 和 num_layers
         print("\n获取模型的专家数量和层数...")
-        num_experts = 8  # 每层有8个专家
-        num_layers = 32  # 假设模型有32层
+        num_experts = 0
+        num_layers = 0
+        test_req = requests[0]
+        test_inputs = tokenizer(test_req, return_tensors="pt").to("cuda")  # 确保输入在 GPU 上
+        with torch.inference_mode():
+            test_outputs = model(
+                **test_inputs,
+                output_router_logits=True,
+                return_dict=True,
+                use_cache=False
+            )
+        router_logits_test = test_outputs.router_logits
+        if len(router_logits_test) > 0:
+            num_experts = router_logits_test[0].shape[1]
+            num_layers = len(router_logits_test)
+
         print(f"模型中专家数量: {num_experts}, 层数: {num_layers}")
 
-        # 模拟 expert 管理与 swap 逻辑
-        max_experts_in_gpu = 20  # 根据 GPU 内存调整
-        experts_in_gpu = set()    # (layer_idx, expert_id)
+        # 模拟expert管理与swap逻辑
+        max_experts_in_gpu = 20  # 调整GPU内存映射至20GB
+        experts_in_gpu = set()   # (layer_idx, expert_id)
 
-        # 初始化设备映射，将所有专家初始设为 'cuda'
-        device_map = {}
-        for layer_idx in range(num_layers):
-            for expert_idx in range(num_experts):
-                device_map[(layer_idx, expert_idx)] = 'cuda'
-                experts_in_gpu.add((layer_idx, expert_idx))
-
-        # 构建 expert 到文件的映射（概念性代码）
+        # 构建expert到文件的映射(概念性代码)
         # 此部分需要根据具体模型结构调整
         expert_to_files = {}
         model_dir = "/vllm-workspace/huggingfaceM87Bv01/Mixtral-8x7B-v0.1"
@@ -230,13 +177,14 @@ def main():
             if "block_sparse_moe.experts" in name:
                 parts = name.split(".")
                 layer_idx = int(parts[2])
-                expert_idx = int(parts[5])
-                expert_key_prefix = f"model.layers.{layer_idx}.block_sparse_moe.experts.{expert_idx}"
+                expert_id = int(parts[5])
+                expert_key_prefix = f"model.layers.{layer_idx}.block_sparse_moe.experts.{expert_id}"
                 if expert_key_prefix not in expert_to_files:
                     expert_to_files[expert_key_prefix] = []
                 expert_to_files[expert_key_prefix].append(name)
 
         # 在此阶段不移动任何专家到 CPU，确保首次前向传播时所有必要的专家在 GPU 上
+        # 如果需要，可以在首次前向传播之后移动部分专家到 CPU
 
         total_swap_in_count = 0
         total_swap_out_count = 0
@@ -254,21 +202,7 @@ def main():
 
             inputs = tokenizer(req, return_tensors="pt").to("cuda")  # 确保输入在 GPU 上
 
-            # Step 1: 获取 router_logits
-            print("  获取 router_logits...")
-            router_logits = get_router_logits(model, inputs)
-            print(f"  router_logits 是一个 tuple，长度为: {len(router_logits)}")
-
-            # Step 2: 确定需要使用的专家
-            used_experts = get_used_experts(router_logits)
-            print(f"  该请求中激活的专家: {used_experts}")
-
-            # Step 3: 确保所需的专家在 GPU 上
-            ensure_experts_on_gpu(model, used_experts, device_map, experts_in_gpu, max_experts_in_gpu)
-
-            # Step 4: 运行 generate
-            print("  运行 generate()...")
-            # 使用 CUDA 事件计时总时间
+            # 使用CUDA事件计时总时间
             total_start = torch.cuda.Event(enable_timing=True)
             total_end = torch.cuda.Event(enable_timing=True)
 
@@ -290,32 +224,85 @@ def main():
             total_runtime_ms = total_start.elapsed_time(total_end)
             total_runtime = total_runtime_ms / 1000.0
 
-            # 假设 MoE 层运行时间为总运行时间的一部分
+            # 假设outputs包含latency信息，这需要根据实际模型输出调整
+            # 如果没有，可以将其替换为其他合适的指标
+            # 这里假设latency为total_runtime的一部分
             moe_latency = total_runtime * 0.5  # 示例值
             moe_latencies.append(moe_latency)
             total_times.append(total_runtime)
 
             print(f"  MoE层运行时间(假设值): {moe_latency:.4f}s")
-            print(f"  整个预测过程运行时间: {total_runtime:.4f}s")
+            print(f"  整个预测过程运行时间(使用CUDA事件计时): {total_runtime:.4f}s")
 
-            # Step 5: 选取用于 swap 的专家（可选）
-            # 例如，保持最新使用的专家在 GPU 上，移动较少使用的专家到 CPU
-            # 这里暂不实现复杂的 swap 策略，保持示例简单
+            # 获取router_logits进行expert统计
+            with torch.inference_mode():
+                router_outputs = model(
+                    **inputs,
+                    output_router_logits=True,
+                    return_dict=True,
+                    use_cache=False
+                )
 
-            # 打印设备一致性验证
-            print("  验证设备一致性...")
-            verify_device_consistency(model, device_map, num_layers, num_experts)
+            router_logits_tuple = router_outputs.router_logits
+            print(f"  router_logits 是一个 tuple，长度为: {len(router_logits_tuple)}")
 
-            print(f"  本请求 swap 统计：swap in 次数=0, swap out 次数=0, swap 操作总延时=0.0000s\n")  # 示例值
+            if len(router_logits_tuple) == 0:
+                print("  没有router logits输出。")
+                continue
+
+            example_shape = router_logits_tuple[0].shape
+            print(f"  每个 router_logits 元素的形状: {example_shape}")
+
+            selected_experts = [logits.argmax(dim=-1) for logits in router_logits_tuple]
+            selected_experts = torch.stack(selected_experts, dim=-1)
+            print(f"  selected_experts shape: {selected_experts.shape}")
+
+            sequence_length, num_layers_actual = selected_experts.shape
+            num_total_experts = 0
+
+            used_experts = []
+            for layer_idx in range(num_layers_actual):
+                experts_in_layer = selected_experts[:, layer_idx].tolist()
+                unique_experts_in_layer = set(experts_in_layer)
+                num_unique_experts = len(unique_experts_in_layer)
+                num_total_experts += num_unique_experts
+                print(f"  Layer {layer_idx}: 激活的专家数量 = {num_unique_experts}")
+                for e_id in unique_experts_in_layer:
+                    used_experts.append((layer_idx, e_id))
+
+            print(f"  该请求中激活的专家总数 = {num_total_experts}")
+
+            used_experts = list(set(used_experts))
+
+            # Expert Swap in/out逻辑
+            request_swap_in_count = 0
+            request_swap_out_count = 0
+            request_swap_latency = 0.0
+
+            for (l_idx, e_id) in used_experts:
+                if (l_idx, e_id) not in experts_in_gpu:
+                    if len(experts_in_gpu) >= max_experts_in_gpu:
+                        # 选择一个随机的专家进行swap out
+                        expert_to_remove = random.choice(list(experts_in_gpu))
+                        print(f"  GPU已满，正在将专家 {expert_to_remove} 移动回 CPU")
+                        swap_out, _, latency_out = swap_out_expert(model, expert_to_remove[0], expert_to_remove[1], experts_in_gpu)
+                        request_swap_out_count += swap_out
+                        request_swap_latency += latency_out
+
+                    # Swap in the required expert
+                    print(f"  将专家 ({l_idx}, {e_id}) 移动到 GPU")
+                    swap_in, _, latency_in = swap_in_expert(model, l_idx, e_id, experts_in_gpu)
+                    request_swap_in_count += swap_in
+                    request_swap_latency += latency_in
+
+            total_swap_in_count += request_swap_in_count
+            total_swap_out_count += request_swap_out_count
+            total_swap_latency += request_swap_latency
+
+            print(f"  本请求swap统计：swap in次数={request_swap_in_count}, swap out次数={request_swap_out_count}, swap操作总延时={request_swap_latency:.4f}s\n")
 
     except Exception as e:
         print(f"错误在请求处理阶段: {str(e)}")
-        print("当前设备映射:")
-        for key, device in device_map.items():
-            print(f"专家 {key} 在 {device}")
-        print("当前模型参数的设备分配情况:")
-        for name, param in model.named_parameters():
-            print(f"{name}: {param.device}")
         traceback.print_exc()
         return  # 终止程序，避免后续代码出错
 
@@ -337,7 +324,7 @@ def main():
         print(f"错误在绘图阶段: {str(e)}")
         traceback.print_exc()
 
-    print(f"\n所有请求合计：swap in 次数={total_swap_in_count}, swap out 次数={total_swap_out_count}, swap 操作总延时={total_swap_latency:.4f}s")
+    print(f"\n所有请求合计：swap in次数={total_swap_in_count}, swap out次数={total_swap_out_count}, swap操作总延时={total_swap_latency:.4f}s")
 
 if __name__ == "__main__":
     torch.cuda.empty_cache()
