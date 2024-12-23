@@ -16,14 +16,14 @@ def move_expert_to_device(model, layer_idx, expert_idx, device):
     将指定层和专家的所有参数及缓冲区移动到目标设备（CPU 或 GPU）。
     """
     try:
-        # 假设 model.layers 是一个 ModuleList 或类似的容器
-        layer = model.layers[layer_idx]
+        # 根据实际路径调整
+        layer = model.model.layers[layer_idx]
         expert = layer.block_sparse_moe.experts[expert_idx]
         expert.to(device)
-        print(f"已将 model.layers.{layer_idx}.block_sparse_moe.experts.{expert_idx} 移动到 {device}")
+        print(f"已将 model.model.layers.{layer_idx}.block_sparse_moe.experts.{expert_idx} 移动到 {device}")
         return True
     except (AttributeError, IndexError) as e:
-        print(f"模型中未找到 model.layers.{layer_idx}.block_sparse_moe.experts.{expert_idx}: {e}")
+        print(f"模型中未找到 model.model.layers.{layer_idx}.block_sparse_moe.experts.{expert_idx}: {e}")
         return False
 
 def swap_in_expert(model, layer_idx, expert_idx, experts_in_gpu):
@@ -101,13 +101,18 @@ def main():
         for name, param in model.named_parameters():
             print(f"{name}: {param.device}")
 
+        # 打印所有模块名称
+        print("\n模型的所有模块名称:")
+        for name, module in model.named_modules():
+            print(name)
+
         # 将第 5 至第 31 层的 block_sparse_moe.experts 移动到 CPU
         print("\n将第 5 至第 31 层的 block_sparse_moe.experts 移动到 CPU...")
         for layer_idx in range(5, 32):
             for expert_idx in range(0, 10):  # 假设每层有 10 个专家，具体数量根据模型调整
                 moved = move_expert_to_device(model, layer_idx, expert_idx, "cpu")
                 if not moved:
-                    print(f"模型中未找到 model.layers.{layer_idx}.block_sparse_moe.experts.{expert_idx}")
+                    print(f"模型中未找到 model.model.layers.{layer_idx}.block_sparse_moe.experts.{expert_idx}")
 
         # 再次打印模型的设备分配情况，以确认移动
         print("\n模型调整后设备分配:")
