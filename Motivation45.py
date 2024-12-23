@@ -49,7 +49,7 @@ def swap_out_expert(model, layer_idx, expert_idx, experts_in_gpu):
     if moved:
         experts_in_gpu.discard((layer_idx, expert_idx))
         swap_latency = end_t - start_t
-        return 0, 1, swap_latency
+        return 1, 1, swap_latency
     else:
         return 0, 0, 0.0
 
