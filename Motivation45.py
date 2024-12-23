@@ -115,20 +115,6 @@ def main():
         for name, module in model.named_modules():
             print(name)
 
-        # 将第 5 至第 31 层的 block_sparse_moe.experts 移动到 CPU
-        # 为了避免第一次前向传播时所有专家在 GPU，保留前4层的专家在 GPU 上
-        print("\n将第 5 至第 31 层的 block_sparse_moe.experts 移动到 CPU...")
-        for layer_idx in range(5, 32):
-            for expert_idx in range(0, 8):
-                moved = move_expert_to_device(model, layer_idx, expert_idx, "cpu")
-                if not moved:
-                    print(f"模型中未找到 model.layers.{layer_idx}.block_sparse_moe.experts.{expert_idx}")
-
-        # 再次打印模型的设备分配情况，以确认移动
-        print("\n模型调整后设备分配:")
-        for name, param in model.named_parameters():
-            print(f"{name}: {param.device}")
-
         model.eval()
         print("模型加载完成！")
 
@@ -196,6 +182,9 @@ def main():
                 if expert_key_prefix not in expert_to_files:
                     expert_to_files[expert_key_prefix] = []
                 expert_to_files[expert_key_prefix].append(name)
+
+        # 在此阶段不移动任何专家到 CPU，确保首次前向传播时所有必要的专家在 GPU 上
+        # 如果需要，可以在首次前向传播之后移动部分专家到 CPU
 
         total_swap_in_count = 0
         total_swap_out_count = 0
