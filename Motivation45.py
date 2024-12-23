@@ -171,7 +171,7 @@ def main():
         ]*11
         # 若您有文件 requests.txt，可自行读取
 
-        max_experts_in_gpu = 20
+        max_experts_in_gpu = 40
         total_swap_in_count  = 0
         total_swap_out_count = 0
         total_swap_latency   = 0.0
