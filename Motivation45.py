@@ -9,183 +9,181 @@ from transformers import (
 from huggingface_hub import login
 import matplotlib.pyplot as plt
 import random
-import traceback  # 确保在顶部导入
+import traceback
 
-def move_expert_to_device(model, layer_idx, expert_idx, device):
+def move_layer_to_device(model, layer_idx, device, layer_device_map):
     """
-    将指定层和专家的所有参数及缓冲区移动到目标设备（CPU 或 GPU）。
+    将指定 Layer 及其所有参数移动到目标设备（CPU 或 GPU），并更新 layer_device_map。
     """
-    prefix = f"model.layers.{layer_idx}.block_sparse_moe.experts.{expert_idx}"
+    layer_prefix = f"model.layers.{layer_idx}"
     try:
-        expert = model.get_submodule(prefix)
-        expert.to(device)
-        print(f"已将 {prefix} 移动到 {device}")
+        layer_module = model.get_submodule(layer_prefix)
+        layer_module.to(device)
+        layer_device_map[layer_idx] = device
+        print(f"[move_layer_to_device] 已将 {layer_prefix} 移动到 {device}")
         return True
     except AttributeError as e:
-        print(f"模型中未找到 {prefix}: {e}")
+        print(f"[move_layer_to_device] 模型中未找到 {layer_prefix}: {e}")
         return False
 
-def swap_in_expert(model, layer_idx, expert_idx, experts_in_gpu):
+def swap_in_layer(model, layer_idx, layer_device_map, layers_in_gpu):
     """
-    将指定专家移动到 GPU。
+    将指定的 Layer 移动到 GPU，并更新 layer_device_map 和 layers_in_gpu 集合。
     """
     start_t = time.perf_counter()
-    moved = move_expert_to_device(model, layer_idx, expert_idx, "cuda")
+    moved = move_layer_to_device(model, layer_idx, "cuda", layer_device_map)
     end_t = time.perf_counter()
     if moved:
-        experts_in_gpu.add((layer_idx, expert_idx))
+        layers_in_gpu.add(layer_idx)
         swap_latency = end_t - start_t
+        print(f"[swap_in_layer] Layer {layer_idx} 已被移动到 GPU")
         return 1, 0, swap_latency
     else:
         return 0, 0, 0.0
 
-def swap_out_expert(model, layer_idx, expert_idx, experts_in_gpu):
+def swap_out_layer(model, layer_idx, layer_device_map, layers_in_gpu):
     """
-    将指定专家移动到 CPU。
+    将指定的 Layer 移动到 CPU，并更新 layer_device_map 和 layers_in_gpu 集合。
     """
     start_t = time.perf_counter()
-    moved = move_expert_to_device(model, layer_idx, expert_idx, "cpu")
+    moved = move_layer_to_device(model, layer_idx, "cpu", layer_device_map)
     end_t = time.perf_counter()
     if moved:
-        experts_in_gpu.discard((layer_idx, expert_idx))
+        if layer_idx in layers_in_gpu:
+            layers_in_gpu.remove(layer_idx)
         swap_latency = end_t - start_t
-        return 1, 1, swap_latency
+        print(f"[swap_out_layer] Layer {layer_idx} 已被移动到 CPU")
+        return 0, 1, swap_latency
     else:
         return 0, 0, 0.0
 
+def find_idle_layer_for_swap_out(layers_in_gpu, current_used_layers):
+    """
+    找到空闲的 Layer 进行 swap out：即不在当前请求中需要使用的 Layer。
+    如果都在使用中，可根据其他策略（如随机、LRU）做替换。
+    """
+    idle_layers = [idx for idx in layers_in_gpu if idx not in current_used_layers]
+    if idle_layers:
+        # 如果有空闲的 Layer，先移除它们
+        return random.choice(idle_layers)
+    else:
+        # 若没有空闲 Layer，则随机策略
+        return random.choice(list(layers_in_gpu))
+
 def main():
     try:
-        print("开始加载模型...")
+        print("[main] 开始加载模型...")
 
-        # 检查GPU可用性和显存
-        print("\n检查GPU状态...")
+        # 检查 GPU 可用性
+        print("\n[main] 检查 GPU 状态...")
         if torch.cuda.is_available():
             print(f"GPU 数量: {torch.cuda.device_count()}")
             for i in range(torch.cuda.device_count()):
-                print(f"GPU {i}: {torch.cuda.get_device_name(i)}, 显存: {torch.cuda.get_device_properties(i).total_memory / (1024 ** 3)} GB")
+                gpu_prop = torch.cuda.get_device_properties(i)
+                print(f"GPU {i}: {gpu_prop.name}, 显存: {gpu_prop.total_memory / (1024 ** 3):.2f} GB")
         else:
-            print("没有可用的 GPU。")
+            print("[main] 没有可用的 GPU。")
             return
 
-        # 使用环境变量管理 token，提升安全性（推荐）
-        token = os.getenv("HUGGINGFACE_TOKEN", "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")  # 请替换为您的实际 token 或设置环境变量
+        # 使用环境变量管理 Token
+        token = os.getenv("HUGGINGFACE_TOKEN", "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")
         if not token:
-            print("请设置环境变量 HUGGINGFACE_TOKEN")
+            print("[main] 请设置环境变量 HUGGINGFACE_TOKEN")
             return
         login(token)
 
-        # 使用4-bit量化配置
+        # 4-bit 量化配置
         quantization_config = BitsAndBytesConfig(
             load_in_4bit=True,
             bnb_4bit_compute_dtype=torch.float16,
             bnb_4bit_use_double_quant=True,
             bnb_4bit_quant_type="nf4"
-            # 移除 'bnb_4bit_compute_type'
         )
 
-        # 加载模型并将其移到 GPU
-        model_id = "mistralai/Mixtral-8x7B-v0.1"  # 请替换为您的实际模型 ID
-        print(f"加载模型 {model_id} ...")
+        # 加载模型并将其移动到 GPU（只是将 embedding 等基础结构先放到 GPU）
+        model_id = "mistralai/Mixtral-8x7B-v0.1"
+        print(f"[main] 加载模型 {model_id} ...")
         model = AutoModelForCausalLM.from_pretrained(
             model_id,
             quantization_config=quantization_config,
-            token=token,  # 使用 'token' 而不是 'use_auth_token'
+            token=token,
             torch_dtype=torch.float16,
-            trust_remote_code=True,  # 如果模型使用自定义代码，需设置为 True
-            use_safetensors=True      # 使用 safetensors 格式
+            trust_remote_code=True,
+            use_safetensors=True
         )
-
-        print("将整个模型移到 GPU...")
-        model.to("cuda")
 
         # 加载分词器
-        print("加载分词器...")
+        print("[main] 加载分词器...")
         tokenizer = AutoTokenizer.from_pretrained(
             model_id,
-            token=token  # 使用 'token' 而不是 'use_auth_token'
+            token=token
         )
 
-        # 打印模型的设备分配情况
-        print("\n模型加载后设备分配:")
+        # 先将模型的 embedding 和 0~4 层放到 GPU 上
+        print("\n[main] 初始化：将模型整体先移动到 GPU...")
+        model.to("cuda")
+
+        # 打印设备分配情况
+        print("\n[main] 模型加载后设备分配:")
         for name, param in model.named_parameters():
-            print(f"{name}: {param.device}")
+            print(f"  {name}: {param.device}")
 
         # 打印所有模块名称
-        print("\n模型的所有模块名称:")
+        print("\n[main] 模型的所有模块名称:")
         for name, module in model.named_modules():
-            print(name)
+            print(f"  {name}")
 
         model.eval()
-        print("模型加载完成！")
-
+        print("[main] 模型加载完成！")
     except Exception as e:
-        print(f"错误在模型加载阶段: {str(e)}")
+        print(f"[main] 错误在模型加载阶段: {str(e)}")
         traceback.print_exc()
-        return  # 终止程序，避免后续代码出错
+        return
 
-    print("\n模型加载完成，开始处理请求...")
+    print("\n[main] 模型加载完成，开始处理请求...")
 
     try:
         # 准备请求
         input_file = "requests.txt"
         requests = []
         if os.path.exists(input_file):
-            print(f"加载请求文件 '{input_file}'...")
+            print(f"[main] 加载请求文件 '{input_file}'...")
             with open(input_file, 'r', encoding='utf-8') as f:
                 for line in f:
                     req = line.strip()
                     if req:
                         requests.append(req)
         else:
-            print(f"请求文件 '{input_file}' 不存在。")
+            print(f"[main] 请求文件 '{input_file}' 不存在。")
             return
 
         if not requests:
-            print("没有有效的请求。")
+            print("[main] 没有有效的请求。")
             return
 
-        # 获取 num_experts 和 num_layers
-        print("\n获取模型的专家数量和层数...")
-        num_experts = 0
-        num_layers = 0
-        test_req = requests[0]
-        test_inputs = tokenizer(test_req, return_tensors="pt").to("cuda")  # 确保输入在 GPU 上
-        with torch.inference_mode():
-            test_outputs = model(
-                **test_inputs,
-                output_router_logits=True,
-                return_dict=True,
-                use_cache=False
-            )
-        router_logits_test = test_outputs.router_logits
-        if len(router_logits_test) > 0:
-            num_experts = router_logits_test[0].shape[1]
-            num_layers = len(router_logits_test)
+        # 假设模型有 32 层
+        num_layers = 32
 
-        print(f"模型中专家数量: {num_experts}, 层数: {num_layers}")
+        # 第 5 ~ 31 层统一移到 CPU
+        # 并建立 layer_device_map，以记录每层所在的设备
+        layer_device_map = {}
+        # 先默认所有层在 GPU（0-31）
+        for idx in range(num_layers):
+            layer_device_map[idx] = "cuda"
 
-        # 模拟expert管理与swap逻辑
-        max_experts_in_gpu = 20  # 调整GPU内存映射至20GB
-        experts_in_gpu = set()   # (layer_idx, expert_id)
+        # 实际将 5~31 层移到 CPU
+        print("\n[main] 初始化阶段：将第 5~31 层移动到 CPU...")
+        for layer_idx in range(5, num_layers):
+            move_layer_to_device(model, layer_idx, "cpu", layer_device_map)
 
-        # 构建expert到文件的映射(概念性代码)
-        # 此部分需要根据具体模型结构调整
-        expert_to_files = {}
-        model_dir = "/vllm-workspace/huggingfaceM87Bv01/Mixtral-8x7B-v0.1"
-        # 遍历所有参数，构建专家映射
-        for name, param in model.named_parameters():
-            if "block_sparse_moe.experts" in name:
-                parts = name.split(".")
-                layer_idx = int(parts[2])
-                expert_id = int(parts[5])
-                expert_key_prefix = f"model.layers.{layer_idx}.block_sparse_moe.experts.{expert_id}"
-                if expert_key_prefix not in expert_to_files:
-                    expert_to_files[expert_key_prefix] = []
-                expert_to_files[expert_key_prefix].append(name)
+        # 记录 GPU 中的层集合
+        # 由于 0~4 层在 GPU，所以初始为 {0,1,2,3,4}
+        layers_in_gpu = set(range(0, 5))
 
-        # 在此阶段不移动任何专家到 CPU，确保首次前向传播时所有必要的专家在 GPU 上
-        # 如果需要，可以在首次前向传播之后移动部分专家到 CPU
+        # GPU 上最多保持 5 个 Layer
+        max_layers_in_gpu = 5
 
+        # 统计
         total_swap_in_count = 0
         total_swap_out_count = 0
         total_swap_latency = 0.0
@@ -195,14 +193,33 @@ def main():
         moe_latencies = []
 
         for req_idx, req in enumerate(requests):
-            print(f"\n处理请求 {req_idx+1}/{len(requests)}: '{req}'")
-            input_ids = tokenizer(req, return_tensors="pt").input_ids
-            req_length = input_ids.shape[1]
+            print(f"\n[main] 处理请求 {req_idx+1}/{len(requests)}: '{req}'")
+            inputs = tokenizer(req, return_tensors="pt").to("cuda")
+            req_length = inputs["input_ids"].shape[1]
             request_lengths.append(req_length)
 
-            inputs = tokenizer(req, return_tensors="pt").to("cuda")  # 确保输入在 GPU 上
+            # 假设需要用到多少层，这里简化地说前 10 层都需要
+            # 或者可以根据 router logits 确定
+            needed_layers = list(range(0, 32))  # 示例
+            # 将 needed_layers 中在 CPU 上的部分 swap in 到 GPU
+            for l_idx in needed_layers:
+                current_dev = layer_device_map.get(l_idx, "cuda")
+                if current_dev != "cuda":
+                    # GPU 满了，需要 swap out
+                    if len(layers_in_gpu) >= max_layers_in_gpu:
+                        # 找到空闲的 Layer（不在 needed_layers 的）
+                        idle_layer = find_idle_layer_for_swap_out(layers_in_gpu, needed_layers)
+                        print(f"  GPU已满，正在将空闲 Layer {idle_layer} 移动回 CPU")
+                        out_in, out_out, lat_out = swap_out_layer(model, idle_layer, layer_device_map, layers_in_gpu)
+                        total_swap_out_count += out_out
+                        total_swap_latency += lat_out
 
-            # 使用CUDA事件计时总时间
+                    print(f"[main] 将 Layer {l_idx} 移动到 GPU...")
+                    in_in, in_out, lat_in = swap_in_layer(model, l_idx, layer_device_map, layers_in_gpu)
+                    total_swap_in_count += in_in
+                    total_swap_latency += lat_in
+
+            # 使用 CUDA 事件计时
             total_start = torch.cuda.Event(enable_timing=True)
             total_end = torch.cuda.Event(enable_timing=True)
 
@@ -224,92 +241,34 @@ def main():
             total_runtime_ms = total_start.elapsed_time(total_end)
             total_runtime = total_runtime_ms / 1000.0
 
-            # 假设outputs包含latency信息，这需要根据实际模型输出调整
-            # 如果没有，可以将其替换为其他合适的指标
-            # 这里假设latency为total_runtime的一部分
-            moe_latency = total_runtime * 0.5  # 示例值
+            # 假设 MoE 层运行时间是总运行时间的一部分
+            moe_latency = total_runtime * 0.5
             moe_latencies.append(moe_latency)
             total_times.append(total_runtime)
 
-            print(f"  MoE层运行时间(假设值): {moe_latency:.4f}s")
-            print(f"  整个预测过程运行时间(使用CUDA事件计时): {total_runtime:.4f}s")
+            print(f"[main] MoE层运行时间(假设值): {moe_latency:.4f}s")
+            print(f"[main] 整个预测过程运行时间: {total_runtime:.4f}s")
 
-            # 获取router_logits进行expert统计
-            with torch.inference_mode():
-                router_outputs = model(
-                    **inputs,
-                    output_router_logits=True,
-                    return_dict=True,
-                    use_cache=False
-                )
-
-            router_logits_tuple = router_outputs.router_logits
-            print(f"  router_logits 是一个 tuple，长度为: {len(router_logits_tuple)}")
-
-            if len(router_logits_tuple) == 0:
-                print("  没有router logits输出。")
-                continue
-
-            example_shape = router_logits_tuple[0].shape
-            print(f"  每个 router_logits 元素的形状: {example_shape}")
-
-            selected_experts = [logits.argmax(dim=-1) for logits in router_logits_tuple]
-            selected_experts = torch.stack(selected_experts, dim=-1)
-            print(f"  selected_experts shape: {selected_experts.shape}")
-
-            sequence_length, num_layers_actual = selected_experts.shape
-            num_total_experts = 0
-
-            used_experts = []
-            for layer_idx in range(num_layers_actual):
-                experts_in_layer = selected_experts[:, layer_idx].tolist()
-                unique_experts_in_layer = set(experts_in_layer)
-                num_unique_experts = len(unique_experts_in_layer)
-                num_total_experts += num_unique_experts
-                print(f"  Layer {layer_idx}: 激活的专家数量 = {num_unique_experts}")
-                for e_id in unique_experts_in_layer:
-                    used_experts.append((layer_idx, e_id))
-
-            print(f"  该请求中激活的专家总数 = {num_total_experts}")
-
-            used_experts = list(set(used_experts))
-
-            # Expert Swap in/out逻辑
-            request_swap_in_count = 0
-            request_swap_out_count = 0
-            request_swap_latency = 0.0
-
-            for (l_idx, e_id) in used_experts:
-                if (l_idx, e_id) not in experts_in_gpu:
-                    if len(experts_in_gpu) >= max_experts_in_gpu:
-                        # 选择一个随机的专家进行swap out
-                        expert_to_remove = random.choice(list(experts_in_gpu))
-                        print(f"  GPU已满，正在将专家 {expert_to_remove} 移动回 CPU")
-                        swap_out, _, latency_out = swap_out_expert(model, expert_to_remove[0], expert_to_remove[1], experts_in_gpu)
-                        request_swap_out_count += swap_out
-                        request_swap_latency += latency_out
-
-                    # Swap in the required expert
-                    print(f"  将专家 ({l_idx}, {e_id}) 移动到 GPU")
-                    swap_in, _, latency_in = swap_in_expert(model, l_idx, e_id, experts_in_gpu)
-                    request_swap_in_count += swap_in
-                    request_swap_latency += latency_in
-
-            total_swap_in_count += request_swap_in_count
-            total_swap_out_count += request_swap_out_count
-            total_swap_latency += request_swap_latency
-
-            print(f"  本请求swap统计：swap in次数={request_swap_in_count}, swap out次数={request_swap_out_count}, swap操作总延时={request_swap_latency:.4f}s\n")
+            # Swap out 不需要的 Layer（示例逻辑）
+            # 如果只需要 0~4 后续在 GPU，上述 needed_layers 不包含 5~9，就可以 swap out
+            for l_idx in needed_layers:
+                # 这里假设请求结束后，这些 needed_layers 又可以 swap out
+                if l_idx >= 5:
+                    # Swap out
+                    if l_idx in layers_in_gpu:
+                        out_in, out_out, lat_out = swap_out_layer(model, l_idx, layer_device_map, layers_in_gpu)
+                        total_swap_out_count += out_out
+                        total_swap_latency += lat_out
 
     except Exception as e:
-        print(f"错误在请求处理阶段: {str(e)}")
+        print(f"[main] 错误在请求处理阶段: {str(e)}")
         traceback.print_exc()
-        return  # 终止程序，避免后续代码出错
+        return
 
     try:
-        # 绘制对比图：MoE latency vs Total Runtime
+        # 绘制对比图
         if len(request_lengths) > 0:
-            print("\n绘制对比图：MoE latency vs Total Runtime...")
+            print("\n[main] 绘制对比图：MoE latency vs Total Runtime...")
             plt.figure(figsize=(10, 6))
             plt.plot(request_lengths, moe_latencies, label='MoE Latency', marker='o')
             plt.plot(request_lengths, total_times, label='Total Inference Runtime', marker='^')
@@ -321,10 +280,21 @@ def main():
             plt.savefig("moe_vs_total_runtime_partial.png")
             plt.show()
     except Exception as e:
-        print(f"错误在绘图阶段: {str(e)}")
+        print(f"[main] 错误在绘图阶段: {str(e)}")
         traceback.print_exc()
 
-    print(f"\n所有请求合计：swap in次数={total_swap_in_count}, swap out次数={total_swap_out_count}, swap操作总延时={total_swap_latency:.4f}s")
+    print(f"\n[main] 所有请求合计：swap in次数={total_swap_in_count}, swap out次数={total_swap_out_count}, swap操作总延时={total_swap_latency:.4f}s")
+
+def find_idle_layer_for_swap_out(layers_in_gpu, current_used_layers):
+    """
+    找到空闲的 Layer 进行 swap out：即不在当前请求中需要使用的 Layer。
+    如果都在使用中，则随机策略。
+    """
+    idle_layers = [layer_idx for layer_idx in layers_in_gpu if layer_idx not in current_used_layers]
+    if idle_layers:
+        return random.choice(idle_layers)
+    else:
+        return random.choice(list(layers_in_gpu))
 
 if __name__ == "__main__":
     torch.cuda.empty_cache()
