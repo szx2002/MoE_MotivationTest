@@ -143,10 +143,12 @@ def main():
         traceback.print_exc()
         return
 
-    # 初始化：将第 5~31 层 Expert 的 w1/w2/w3 移到 CPU；0~4 层保留在 GPU
-    print("\n[main] 初始化: 仅把5~31层的 Experts (w1,w2,w3) => CPU, 保留 Gate/LN 在 GPU")
+    # 假设我们已知模型有 32 层，每层 8 个 Expert（示例，可根据实际情况调整）
     num_layers_total = 32
     num_experts_per_layer = 8
+
+    # 初始化：将第 5~31 层 Expert 的 w1/w2/w3 移到 CPU；0~4 层保留在 GPU
+    print("\n[main] 初始化: 仅把5~31层的 Experts (w1,w2,w3) => CPU, 保留 Gate/LN 在 GPU")
     expert_device_map = {}
     experts_in_gpu = set()
 
@@ -168,9 +170,9 @@ def main():
         # 示例 requests
         requests = [
             "What is artificial intelligence? It's about machine reasoning."
-        ]*11
-        # 若您有文件 requests.txt，可自行读取
+        ] * 5
 
+        # 设定 GPU 上最多保留多少个 Experts
         max_experts_in_gpu = 40
         total_swap_in_count  = 0
         total_swap_out_count = 0
@@ -186,27 +188,82 @@ def main():
             req_length = inputs["input_ids"].shape[1]
             request_lengths.append(req_length)
 
-            # (可选) 路由
-            used_experts = {(6,0),(6,1)}  # 示例: 需要 6层 experts=0,1
+            # -------------------------------------------------------
+            # 1) 先做一次前向传播来获取 router_logits（动态检测 used_experts）
+            # -------------------------------------------------------
+            try:
+                with torch.inference_mode():
+                    router_outputs = model(
+                        **inputs,
+                        output_router_logits=True,
+                        return_dict=True,
+                        use_cache=False
+                    )
+            except Exception as e:
+                print(f"[main] 获取 router_logits 时出错: {e}")
+                traceback.print_exc()
+                continue
 
-            # swap_in needed experts
-            for (l,e) in used_experts:
-                if expert_device_map.get((l,e),"cpu") != "cuda":
-                    # 若 GPU满 => swap_out一个空闲
+            router_logits_tuple = router_outputs.router_logits
+            if len(router_logits_tuple) == 0:
+                # 若模型不输出router_logits，可能是MoE部分未启用
+                print("  [main] 本次请求未产生 router_logits，跳过 Swap 逻辑...")
+                used_experts = []
+            else:
+                # 每个 router_logits 的形状: (sequence_length, num_experts)
+                # router_logits_tuple 的长度 = 实际 MoE 层数
+                num_layers_actual = len(router_logits_tuple)
+                print(f"  [main] router_logits_tuple 大小: {num_layers_actual} 个元素")
+
+                # 按照第一份代码的做法，argmax(dim=-1)，获取每个 token 在该层被分配的 expert
+                selected_experts = [logits.argmax(dim=-1) for logits in router_logits_tuple]
+                # 堆叠后形状: (sequence_length, num_layers_actual)
+                selected_experts = torch.stack(selected_experts, dim=-1)
+
+                used_experts = []
+                sequence_length, num_layers_actual = selected_experts.shape
+                num_total_experts = 0
+
+                for layer_idx in range(num_layers_actual):
+                    experts_in_layer = selected_experts[:, layer_idx].tolist()
+                    unique_experts_in_layer = set(experts_in_layer)
+                    num_unique_experts = len(unique_experts_in_layer)
+                    num_total_experts += num_unique_experts
+                    print(f"    Layer {layer_idx}: 激活的专家数量 = {num_unique_experts}")
+                    for e_id in unique_experts_in_layer:
+                        used_experts.append((layer_idx, e_id))
+
+                used_experts = list(set(used_experts))
+                print(f"  [main] 本次请求所有激活专家数(去重后) = {len(used_experts)}")
+
+            # -------------------------------------------------------
+            # 2) Swap In 需要的 Experts
+            # -------------------------------------------------------
+            for (l, e) in used_experts:
+                current_device = expert_device_map.get((l, e), "cpu")
+                if current_device != "cuda":
+                    # 如果 GPU 已满，先 Swap Out 一个空闲的 Expert
                     if len(experts_in_gpu) >= max_experts_in_gpu:
                         idle_exp = find_idle_expert_for_swap_out(experts_in_gpu, used_experts)
                         print(f"[main] GPU已满, swap out idle {idle_exp}")
-                        _, out_cnt, out_lat = swap_out_expert(model, idle_exp[0], idle_exp[1], expert_device_map, experts_in_gpu)
+                        _, out_cnt, out_lat = swap_out_expert(
+                            model, idle_exp[0], idle_exp[1],
+                            expert_device_map, experts_in_gpu
+                        )
                         total_swap_out_count += out_cnt
                         total_swap_latency   += out_lat
-                    in_in, in_out, lat_in = swap_in_expert(model, l,e, expert_device_map, experts_in_gpu)
+
+                    in_in, _, lat_in = swap_in_expert(model, l, e, expert_device_map, experts_in_gpu)
                     total_swap_in_count  += in_in
                     total_swap_latency   += lat_in
 
-            # 推理
+            # -------------------------------------------------------
+            # 3) 进行真正的推理 (model.generate)
+            # -------------------------------------------------------
             total_start = torch.cuda.Event(enable_timing=True)
             total_end   = torch.cuda.Event(enable_timing=True)
             total_start.record()
+
             with torch.inference_mode():
                 outputs = model.generate(
                     **inputs,
@@ -218,34 +275,47 @@ def main():
                     repetition_penalty=1.1,
                     use_cache=False
                 )
+
             total_end.record()
             total_end.synchronize()
             rt_ms = total_start.elapsed_time(total_end)
-            rt_s  = rt_ms/1000.0
+            rt_s  = rt_ms / 1000.0
             total_times.append(rt_s)
 
-            # 假设 MoE 占一半
-            moe_latency = rt_s*0.5
+            # 这里我们假设 MoE 占推理时间的一半
+            moe_latency = rt_s * 0.5
             moe_latencies.append(moe_latency)
 
-            print(f"[main] MoE层时间(假设): {moe_latency:.4f}s, 总推理: {rt_s:.4f}s")
+            print(f"[main] 推理完成, MoE层估计耗时: {moe_latency:.4f}s, 总推理耗时: {rt_s:.4f}s")
 
-            # (可选) swap_out used_experts
-            for (l,e) in used_experts:
-                if (l,e) in experts_in_gpu:
-                    _, out_cnt, out_lat = swap_out_expert(model, l,e, expert_device_map, experts_in_gpu)
+            # -------------------------------------------------------
+            # 4)（可选）Swap Out 刚刚使用的 Experts
+            #    如果你希望保持 GPU 专家数量不变或做分批管理，
+            #    可根据策略将刚刚用过的专家也 Swap Out 回 CPU
+            # -------------------------------------------------------
+            # 如果你想让 GPU 上常驻 0~4层专家，那么这里只 Swap Out 5~31层
+            # 下面仅做演示：
+            for (l, e) in used_experts:
+                # 如果你希望保持低显存占用，则可把用过的专家都移除
+                if (l, e) in experts_in_gpu and l >= 5:
+                    _, out_cnt, out_lat = swap_out_expert(
+                        model, l, e,
+                        expert_device_map, experts_in_gpu
+                    )
                     total_swap_out_count += out_cnt
                     total_swap_latency   += out_lat
 
-        # 对比图
-        if len(request_lengths)>0:
+        # -------------------------------------------------------
+        # 5) 对比图
+        # -------------------------------------------------------
+        if len(request_lengths) > 0:
             try:
-                plt.figure(figsize=(10,6))
+                plt.figure(figsize=(10, 6))
                 plt.plot(request_lengths, moe_latencies, label='MoE Latency', marker='o')
                 plt.plot(request_lengths, total_times, label='Total Inference Time', marker='^')
                 plt.xlabel("Request Length (tokens)")
                 plt.ylabel("Runtime (seconds)")
-                plt.title("Expert-level Swap (w1,w2,w3 only), Gate/LN in GPU")
+                plt.title("Expert-level Swap (Dynamic used_experts detection)")
                 plt.legend()
                 plt.grid(True)
                 plt.savefig("moe_swap_expert_weights_only.png")
@@ -254,7 +324,7 @@ def main():
                 print(f"[main] 绘图时异常: {e}")
                 traceback.print_exc()
 
-        print(f"[main] 总 swap_in={total_swap_in_count}, swap_out={total_swap_out_count}, swap_latency={total_swap_latency:.4f}s")
+        print(f"[main] 总计: swap_in={total_swap_in_count}, swap_out={total_swap_out_count}, swap_latency={total_swap_latency:.4f}s")
 
     except Exception as e:
         print(f"[main] 请求处理阶段出错: {e}")
