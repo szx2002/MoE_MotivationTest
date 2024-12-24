@@ -138,19 +138,19 @@ def main():
     experts_in_gpu = set()         # 用来记录当前在 GPU 的 (layer_idx, expert_idx)
     expert_device_map = {}         # 记录所有 (layer_idx, expert_idx) 当前所在设备
 
-    # 示例：将 0~4 层的所有 Experts 常驻 GPU，5~31 层移到 CPU
-    for layer_idx in range(5, num_layers_total):
+    # 将 0~4 层的所有 Experts 常驻 GPU，5~31 层移到 CPU
+    for layer_idx in range(16, num_layers_total):
         for expert_idx in range(num_experts_per_layer):
             move_expert_weights_to_device(model, layer_idx, expert_idx, "cpu")
             expert_device_map[(layer_idx, expert_idx)] = "cpu"
 
-    for layer_idx in range(0, 5):
+    for layer_idx in range(0, 16):
         for expert_idx in range(num_experts_per_layer):
             expert_device_map[(layer_idx, expert_idx)] = "cuda"
             experts_in_gpu.add((layer_idx, expert_idx))
 
     # GPU 上最多容纳多少个 Expert
-    max_experts_in_gpu = 40
+    max_experts_in_gpu = 128
 
     # 统计 Swap 次数和延时
     total_swap_in_count  = 0
@@ -251,8 +251,6 @@ def main():
             print("[main] 推理阶段出错:", e)
             traceback.print_exc()
 
-        # 4.5) （可选）如果你想在推理结束后释放部分专家，就在这里 Swap Out
-        #      例如：把 5~31 层的专家都 Swap 回 CPU，只保留 0~4 层
         for (l,e) in used_experts:
             if l >= 5 and (l,e) in experts_in_gpu:
                 _, out_cnt, out_lat = swap_out_expert(
