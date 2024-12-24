@@ -147,6 +147,7 @@ def main():
     total_swap_in_count  = 0
     total_swap_out_count = 0
     total_swap_latency   = 0.0
+    every_swap_latency = 0.0
 
     input_file = "requests.txt"
     requests = []
@@ -255,6 +256,7 @@ def main():
             total_end.synchronize()
             elapsed_ms = total_start.elapsed_time(total_end)
             elapsed_s  = elapsed_ms / 1000.0
+            every_swap_latency = outputs['latency']
 
             gen_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
             print(f"[main] 推理结果: {gen_text}")
