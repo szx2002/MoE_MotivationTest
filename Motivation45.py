@@ -108,7 +108,7 @@ def main():
     # 1) 初始化/加载模型 & 分词器
     # -------------------------------
     try:
-        token = os.getenv("HUGGINGFACE_TOKEN", "hf_xxx")
+        token = os.getenv("HUGGINGFACE_TOKEN", "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")
         login(token)
 
         quant_config = BitsAndBytesConfig(
