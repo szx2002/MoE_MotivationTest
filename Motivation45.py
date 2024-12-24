@@ -268,7 +268,7 @@ def main():
 
 
         # 记录当前请求的 swap 统计到文件
-        f_out.write(f"{swap_in_count} {swap_out_count} {outputs['latency']}\n")
+        f_out.write(f"{swap_in_count} {swap_out_count} {every_swap_latency}\n")
 
     # 关闭输出文件
     f_out.close()
