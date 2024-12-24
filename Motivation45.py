@@ -252,7 +252,7 @@ def main():
             traceback.print_exc()
 
         for (l,e) in used_experts:
-            if l >= 5 and (l,e) in experts_in_gpu:
+            if l >= 32 and (l,e) in experts_in_gpu:
                 _, out_cnt, out_lat = swap_out_expert(
                     model, l, e,
                     expert_device_map, experts_in_gpu
