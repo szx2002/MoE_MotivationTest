@@ -1,15 +1,19 @@
+# 文件示例: inference_moe_scheme_b.py
+
 import os
 import time
+import random
+import traceback
+import matplotlib.pyplot as plt
+
 import torch
 from transformers import (
-    AutoTokenizer,
     AutoModelForCausalLM,
+    AutoTokenizer,
     BitsAndBytesConfig
 )
 from huggingface_hub import login
-import matplotlib.pyplot as plt
-import random
-import traceback
+
 
 def move_expert_weights_to_device(model, layer_idx, expert_idx, device):
     """
@@ -37,6 +41,7 @@ def move_expert_weights_to_device(model, layer_idx, expert_idx, device):
         print(f"[move_expert_weights_to_device] {prefix} 未发现 w1/w2/w3")
         return False
 
+
 def swap_in_expert(model, layer_idx, expert_idx, expert_device_map, experts_in_gpu):
     """
     将 (layer_idx, expert_idx) 的 w1/w2/w3 移动到 GPU，并更新映射 & 集合。
@@ -49,9 +54,10 @@ def swap_in_expert(model, layer_idx, expert_idx, expert_device_map, experts_in_g
         expert_device_map[(layer_idx, expert_idx)] = "cuda"
         experts_in_gpu.add((layer_idx, expert_idx))
         latency = end_t - start_t
-        print(f"[swap_in_expert] Expert({layer_idx}, {expert_idx}) => GPU(w1,w2,w3)")
+        print(f"[swap_in_expert] Expert({layer_idx}, {expert_idx}) => GPU")
         return 1, 0, latency
     return 0, 0, 0.0
+
 
 def swap_out_expert(model, layer_idx, expert_idx, expert_device_map, experts_in_gpu):
     """
@@ -66,9 +72,10 @@ def swap_out_expert(model, layer_idx, expert_idx, expert_device_map, experts_in_
         if (layer_idx, expert_idx) in experts_in_gpu:
             experts_in_gpu.remove((layer_idx, expert_idx))
         latency = end_t - start_t
-        print(f"[swap_out_expert] Expert({layer_idx}, {expert_idx}) => CPU(w1,w2,w3)")
-        return 0, 1, latency
+        print(f"[swap_out_expert] Expert({layer_idx}, {expert_idx}) => CPU")
+        return 1, 1, latency
     return 0, 0, 0.0
+
 
 def find_idle_expert_for_swap_out(experts_in_gpu, needed_experts):
     """
@@ -81,26 +88,17 @@ def find_idle_expert_for_swap_out(experts_in_gpu, needed_experts):
     else:
         return random.choice(list(experts_in_gpu))
 
+
 def main():
+    #---------------------------------------------------------
+    # 1) 初始化/加载模型
+    #---------------------------------------------------------
     try:
-        print("[main] 初始化加载模型...")
-        if not torch.cuda.is_available():
-            print("[main] 无可用 GPU, 退出。")
-            return
-
-        # 打印 GPU 信息
-        for i in range(torch.cuda.device_count()):
-            prop = torch.cuda.get_device_properties(i)
-            print(f"[main] GPU {i}: {prop.name}, total_mem={prop.total_memory/(1024**3):.2f} GB")
-
-        # 登录
-        token = os.getenv("HUGGINGFACE_TOKEN", "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")
+        token = os.getenv("HUGGINGFACE_TOKEN", "hf_xxx")  # 请替换为你的真实token，或设置环境变量
         if not token:
-            print("[main] HUGGINGFACE_TOKEN 未设置, 退出。")
-            return
+            print("[main] 未发现HUGGINGFACE_TOKEN，请自行设置后再试。")
         login(token)
 
-        # 4-bit 量化配置
         quant_config = BitsAndBytesConfig(
             load_in_4bit=True,
             bnb_4bit_compute_dtype=torch.float16,
@@ -108,8 +106,8 @@ def main():
             bnb_4bit_quant_type="nf4"
         )
 
-        model_id = "mistralai/Mixtral-8x7B-v0.1"
-        print(f"[main] 加载模型 {model_id}...")
+        model_id = "mistralai/Mixtral-8x7B-v0.1"  # 示例ID
+        print(f"[main] 开始加载模型 {model_id}...")
         model = AutoModelForCausalLM.from_pretrained(
             model_id,
             quantization_config=quant_config,
@@ -118,148 +116,114 @@ def main():
             trust_remote_code=True,
             use_safetensors=True
         )
+        tokenizer = AutoTokenizer.from_pretrained(model_id, token=token)
 
-        tokenizer = AutoTokenizer.from_pretrained(
-            model_id,
-            token=token
-        )
-
-        print("[main] 将模型基础结构移动到 GPU...")
+        print("[main] 将模型移动到 GPU...")
         model.to("cuda")
-
-        print("\n[main] 初始化后设备分配:")
-        for name, param in model.named_parameters():
-            print(f"  {name}: {param.device}")
-
-        print("\n[main] 模型子模块:")
-        for name, module in model.named_modules():
-            print(f"  {name}")
-
         model.eval()
         print("[main] 模型加载完成！")
 
     except Exception as e:
-        print(f"[main] 初始化阶段出错: {e}")
+        print("[main] 加载模型出错:", e)
         traceback.print_exc()
         return
 
-    # 假设我们已知模型有 32 层，每层 8 个 Expert（示例，可根据实际情况调整）
+    #---------------------------------------------------------
+    # 2) 设置初始专家分布 (部分专家留在GPU，其余在CPU)
+    #   假设我们知道这个模型有 32 层，每层 8 个 Experts
+    #---------------------------------------------------------
     num_layers_total = 32
     num_experts_per_layer = 8
 
-    # 初始化：将第 5~31 层 Expert 的 w1/w2/w3 移到 CPU；0~4 层保留在 GPU
-    print("\n[main] 初始化: 仅把5~31层的 Experts (w1,w2,w3) => CPU, 保留 Gate/LN 在 GPU")
-    expert_device_map = {}
-    experts_in_gpu = set()
+    experts_in_gpu = set()         # 用来记录当前在 GPU 的 (layer_idx, expert_idx)
+    expert_device_map = {}         # 记录所有 (layer_idx, expert_idx) 当前所在设备
 
-    # 假设 0~4 层 Experts 仍在 GPU
-    for layer_idx in range(0, 5):
-        for expert_idx in range(num_experts_per_layer):
-            expert_device_map[(layer_idx, expert_idx)] = "cuda"
-            experts_in_gpu.add((layer_idx, expert_idx))
-
-    # 将 5~31层 Experts 移到 CPU (仅 w1/w2/w3)
+    # 示例：将 0~4 层的所有 Experts 常驻 GPU，5~31 层移到 CPU
     for layer_idx in range(5, num_layers_total):
         for expert_idx in range(num_experts_per_layer):
             move_expert_weights_to_device(model, layer_idx, expert_idx, "cpu")
             expert_device_map[(layer_idx, expert_idx)] = "cpu"
 
-    print("[main] 初始化完成, 开始处理请求...")
+    for layer_idx in range(0, 5):
+        for expert_idx in range(num_experts_per_layer):
+            expert_device_map[(layer_idx, expert_idx)] = "cuda"
+            experts_in_gpu.add((layer_idx, expert_idx))
 
-    try:
-        # 示例 requests
-        requests = [
-            "What is artificial intelligence? It's about machine reasoning."
-        ] * 5
+    # GPU 上最多容纳多少个 Expert
+    max_experts_in_gpu = 40
 
-        # 设定 GPU 上最多保留多少个 Experts
-        max_experts_in_gpu = 40
-        total_swap_in_count  = 0
-        total_swap_out_count = 0
-        total_swap_latency   = 0.0
+    # 统计 Swap 次数和延时
+    total_swap_in_count  = 0
+    total_swap_out_count = 0
+    total_swap_latency   = 0.0
 
-        request_lengths = []
-        total_times     = []
-        moe_latencies   = []
+    #---------------------------------------------------------
+    # 3) 构造一些请求
+    #---------------------------------------------------------
+    requests = [
+        "What is artificial intelligence? It's about machine reasoning.",
+        "Tell me a joke about science.",
+        "Explain the concept of quantum entanglement."
+    ]
 
-        for idx, req in enumerate(requests):
-            print(f"\n[main] 第 {idx+1}/{len(requests)} 个请求: {req}")
-            inputs = tokenizer(req, return_tensors="pt").to("cuda")
-            req_length = inputs["input_ids"].shape[1]
-            request_lengths.append(req_length)
+    #---------------------------------------------------------
+    # 4) 逐请求推理：先 "只算路由" -> Swap In -> 再正式generate
+    #---------------------------------------------------------
+    for req_idx, req_text in enumerate(requests):
+        print(f"\n[main] 第 {req_idx+1}/{len(requests)} 个请求: {req_text}")
+        inputs = tokenizer(req_text, return_tensors="pt").to("cuda")
 
-            # -------------------------------------------------------
-            # 1) 先做一次前向传播来获取 router_logits（动态检测 used_experts）
-            # -------------------------------------------------------
-            try:
-                with torch.inference_mode():
-                    router_outputs = model(
-                        **inputs,
-                        output_router_logits=True,
-                        return_dict=True,
-                        use_cache=False
+        # 4.1) 先只获取路由 logits，不进专家
+        #      这里要依赖于你在modeling_mixtral.py中增加的
+        #      MixtralForCausalLM.forward_router_only(...) 方法。
+        try:
+            router_logits_tuple = model.forward_router_only(
+                input_ids=inputs["input_ids"]
+            )
+        except Exception as e:
+            print("[main] 获取 router_logits 时出错:", e)
+            traceback.print_exc()
+            continue
+
+        if not router_logits_tuple:
+            print("[main] router_logits_tuple 为空，本次不做 Swap。")
+            used_experts = []
+        else:
+            # 4.2) 根据 router_logits 解析出本次会被路由选中的 experts
+            used_experts = []
+            for layer_idx, logits in enumerate(router_logits_tuple):
+                # 假设 logits 形状: (batch*seq_len, num_experts)
+                selected = logits.argmax(dim=-1).tolist()
+                unique_experts_in_layer = set(selected)
+                for e_id in unique_experts_in_layer:
+                    used_experts.append((layer_idx, e_id))
+
+            used_experts = list(set(used_experts))
+            print(f"[main] 预测本次会激活 {len(used_experts)} 个 experts: {used_experts}")
+
+        # 4.3) Swap In
+        for (l,e) in used_experts:
+            current_dev = expert_device_map.get((l,e), "cpu")
+            if current_dev != "cuda":
+                # 如果 GPU 满 => swap out 一个空闲专家
+                if len(experts_in_gpu) >= max_experts_in_gpu:
+                    idle_exp = find_idle_expert_for_swap_out(experts_in_gpu, used_experts)
+                    _, out_cnt, out_lat = swap_out_expert(
+                        model, idle_exp[0], idle_exp[1],
+                        expert_device_map, experts_in_gpu
                     )
-            except Exception as e:
-                print(f"[main] 获取 router_logits 时出错: {e}")
-                traceback.print_exc()
-                continue
+                    total_swap_out_count += out_cnt
+                    total_swap_latency   += out_lat
 
-            router_logits_tuple = router_outputs.router_logits
-            if len(router_logits_tuple) == 0:
-                # 若模型不输出router_logits，可能是MoE部分未启用
-                print("  [main] 本次请求未产生 router_logits，跳过 Swap 逻辑...")
-                used_experts = []
-            else:
-                # 每个 router_logits 的形状: (sequence_length, num_experts)
-                # router_logits_tuple 的长度 = 实际 MoE 层数
-                num_layers_actual = len(router_logits_tuple)
-                print(f"  [main] router_logits_tuple 大小: {num_layers_actual} 个元素")
+                in_in, _, lat_in = swap_in_expert(
+                    model, l, e,
+                    expert_device_map, experts_in_gpu
+                )
+                total_swap_in_count  += in_in
+                total_swap_latency   += lat_in
 
-                # 按照第一份代码的做法，argmax(dim=-1)，获取每个 token 在该层被分配的 expert
-                selected_experts = [logits.argmax(dim=-1) for logits in router_logits_tuple]
-                # 堆叠后形状: (sequence_length, num_layers_actual)
-                selected_experts = torch.stack(selected_experts, dim=-1)
-
-                used_experts = []
-                sequence_length, num_layers_actual = selected_experts.shape
-                num_total_experts = 0
-
-                for layer_idx in range(num_layers_actual):
-                    experts_in_layer = selected_experts[:, layer_idx].tolist()
-                    unique_experts_in_layer = set(experts_in_layer)
-                    num_unique_experts = len(unique_experts_in_layer)
-                    num_total_experts += num_unique_experts
-                    print(f"    Layer {layer_idx}: 激活的专家数量 = {num_unique_experts}")
-                    for e_id in unique_experts_in_layer:
-                        used_experts.append((layer_idx, e_id))
-
-                used_experts = list(set(used_experts))
-                print(f"  [main] 本次请求所有激活专家数(去重后) = {len(used_experts)}")
-
-            # -------------------------------------------------------
-            # 2) Swap In 需要的 Experts
-            # -------------------------------------------------------
-            for (l, e) in used_experts:
-                current_device = expert_device_map.get((l, e), "cpu")
-                if current_device != "cuda":
-                    # 如果 GPU 已满，先 Swap Out 一个空闲的 Expert
-                    if len(experts_in_gpu) >= max_experts_in_gpu:
-                        idle_exp = find_idle_expert_for_swap_out(experts_in_gpu, used_experts)
-                        print(f"[main] GPU已满, swap out idle {idle_exp}")
-                        _, out_cnt, out_lat = swap_out_expert(
-                            model, idle_exp[0], idle_exp[1],
-                            expert_device_map, experts_in_gpu
-                        )
-                        total_swap_out_count += out_cnt
-                        total_swap_latency   += out_lat
-
-                    in_in, _, lat_in = swap_in_expert(model, l, e, expert_device_map, experts_in_gpu)
-                    total_swap_in_count  += in_in
-                    total_swap_latency   += lat_in
-
-            # -------------------------------------------------------
-            # 3) 进行真正的推理 (model.generate)
-            # -------------------------------------------------------
+        # 4.4) 现在真正调用 model.generate(...) 做完整推理
+        try:
             total_start = torch.cuda.Event(enable_timing=True)
             total_end   = torch.cuda.Event(enable_timing=True)
             total_start.record()
@@ -267,69 +231,44 @@ def main():
             with torch.inference_mode():
                 outputs = model.generate(
                     **inputs,
-                    max_new_tokens=1,
-                    num_return_sequences=1,
+                    max_new_tokens=64,
                     do_sample=True,
                     temperature=0.7,
-                    top_p=0.95,
-                    repetition_penalty=1.1,
-                    use_cache=False
+                    top_p=0.9,
+                    repetition_penalty=1.1
                 )
 
             total_end.record()
             total_end.synchronize()
-            rt_ms = total_start.elapsed_time(total_end)
-            rt_s  = rt_ms / 1000.0
-            total_times.append(rt_s)
+            elapsed_ms = total_start.elapsed_time(total_end)
+            elapsed_s  = elapsed_ms / 1000.0
 
-            # 这里我们假设 MoE 占推理时间的一半
-            moe_latency = rt_s * 0.5
-            moe_latencies.append(moe_latency)
+            gen_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
+            print(f"[main] 推理结果: {gen_text}")
+            print(f"[main] 本次完整推理耗时: {elapsed_s:.4f}s")
 
-            print(f"[main] 推理完成, MoE层估计耗时: {moe_latency:.4f}s, 总推理耗时: {rt_s:.4f}s")
+        except Exception as e:
+            print("[main] 推理阶段出错:", e)
+            traceback.print_exc()
 
-            # -------------------------------------------------------
-            # 4)（可选）Swap Out 刚刚使用的 Experts
-            #    如果你希望保持 GPU 专家数量不变或做分批管理，
-            #    可根据策略将刚刚用过的专家也 Swap Out 回 CPU
-            # -------------------------------------------------------
-            # 如果你想让 GPU 上常驻 0~4层专家，那么这里只 Swap Out 5~31层
-            # 下面仅做演示：
-            for (l, e) in used_experts:
-                # 如果你希望保持低显存占用，则可把用过的专家都移除
-                if (l, e) in experts_in_gpu and l >= 5:
-                    _, out_cnt, out_lat = swap_out_expert(
-                        model, l, e,
-                        expert_device_map, experts_in_gpu
-                    )
-                    total_swap_out_count += out_cnt
-                    total_swap_latency   += out_lat
+        # 4.5) （可选）如果你想在推理结束后释放部分专家，就在这里 Swap Out
+        #      例如：把 5~31 层的专家都 Swap 回 CPU，只保留 0~4 层
+        for (l,e) in used_experts:
+            if l >= 5 and (l,e) in experts_in_gpu:
+                _, out_cnt, out_lat = swap_out_expert(
+                    model, l, e,
+                    expert_device_map, experts_in_gpu
+                )
+                total_swap_out_count += out_cnt
+                total_swap_latency   += out_lat
 
-        # -------------------------------------------------------
-        # 5) 对比图
-        # -------------------------------------------------------
-        if len(request_lengths) > 0:
-            try:
-                plt.figure(figsize=(10, 6))
-                plt.plot(request_lengths, moe_latencies, label='MoE Latency', marker='o')
-                plt.plot(request_lengths, total_times, label='Total Inference Time', marker='^')
-                plt.xlabel("Request Length (tokens)")
-                plt.ylabel("Runtime (seconds)")
-                plt.title("Expert-level Swap (Dynamic used_experts detection)")
-                plt.legend()
-                plt.grid(True)
-                plt.savefig("moe_swap_expert_weights_only.png")
-                plt.show()
-            except Exception as e:
-                print(f"[main] 绘图时异常: {e}")
-                traceback.print_exc()
+    #---------------------------------------------------------
+    # 5) 打印统计
+    #---------------------------------------------------------
+    print(f"\n[main] 所有请求完成!")
+    print(f"       swap_in={total_swap_in_count}, swap_out={total_swap_out_count}, "
+          f"swap_latency={total_swap_latency:.4f}s")
 
-        print(f"[main] 总计: swap_in={total_swap_in_count}, swap_out={total_swap_out_count}, swap_latency={total_swap_latency:.4f}s")
 
-    except Exception as e:
-        print(f"[main] 请求处理阶段出错: {e}")
-        traceback.print_exc()
-
-if __name__=="__main__":
-    torch.cuda.empty_cache()
+if __name__ == "__main__":
     main()
