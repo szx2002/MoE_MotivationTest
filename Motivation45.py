@@ -13,9 +13,10 @@ from huggingface_hub import login
 from transformers import (
     AutoTokenizer,
     AutoModelForCausalLM,
-    BitsAndBytesConfig,
-    global_swap_monitor
+    BitsAndBytesConfig
 )
+from transformers.models.mixtral.modeling_mixtral import global_swap_monitor
+
 
 
 def move_expert_weights_to_device(model, layer_idx, expert_idx, device):
