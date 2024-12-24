@@ -257,7 +257,7 @@ def main():
                     model, l, e,
                     expert_device_map, experts_in_gpu
                 )
-                total_swap_out_count += out_cnt
+                #total_swap_out_count += out_cnt
                 total_swap_latency   += out_lat
 
     #---------------------------------------------------------
