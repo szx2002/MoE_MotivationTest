@@ -94,7 +94,7 @@ def main():
     # 1) 初始化/加载模型
     #---------------------------------------------------------
     try:
-        token = os.getenv("HUGGINGFACE_TOKEN", "hf_xxx")  # 请替换为你的真实token，或设置环境变量
+        token = os.getenv("HUGGINGFACE_TOKEN", "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")  # 请替换为你的真实token，或设置环境变量
         if not token:
             print("[main] 未发现HUGGINGFACE_TOKEN，请自行设置后再试。")
         login(token)
