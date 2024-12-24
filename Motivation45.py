@@ -6,7 +6,7 @@ import torch
 import matplotlib.pyplot as plt
 
 # 假设你在 modeling_mixtral.py 中已经定义了 global_swap_monitor 实例
-from modeling_mixtral import global_swap_monitor
+import global_swap_monitor
 
 # 假设已有 BitsAndBytesConfig, AutoModelForCausalLM, AutoTokenizer, login, etc.
 from huggingface_hub import login
